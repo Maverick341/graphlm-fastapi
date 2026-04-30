@@ -26,7 +26,7 @@ class Source(Base):
     title:      Mapped[str]          = mapped_column(String, nullable=False)
     type:       Mapped[SourceType]   = mapped_column(Enum(SourceType),   nullable=False)
     status:     Mapped[SourceStatus] = mapped_column(Enum(SourceStatus), default=SourceStatus.uploaded)
-    metadata:       Mapped[dict]         = mapped_column(JSON, default=dict)
+    source_metadata: Mapped[dict]        = mapped_column("metadata", JSON, default=dict)
     created_at: Mapped[datetime]     = mapped_column(default=func.now())
 
     source_index: Mapped["SourceIndex"] = relationship(

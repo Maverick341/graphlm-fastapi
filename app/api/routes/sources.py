@@ -45,28 +45,10 @@ from app.utils.db_queries import (
 )
 from app.repositories import source_repo
 from app.api.limiter import limiter
+from app.services.indexing.pipeline import run_indexing_pipeline
+from app.services.cloudinary_service import upload_document_to_cloudinary, delete_document_from_cloudinary
 
 router = APIRouter(prefix="/sources", tags=["sources"])
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Async Background Tasks (TBD)
-# ─────────────────────────────────────────────────────────────────────────
-
-async def index_source_background(source_id: UUID, db_url: str):
-    """
-    Background task to index a source (vector + graph).
-    
-    Called asynchronously after source creation.
-    Updates source status and persists indexing metadata.
-    
-    TODO: Implement actual indexing logic:
-    1. Vector indexing: Chunk files → embed → index in Qdrant
-    2. Graph indexing: Extract entities/relations → persist to Neo4j
-    3. Update SourceIndex with collection_name and counts
-    4. Update Source.status to "indexed" (or "failed" on error)
-    """
-    pass
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -74,24 +56,26 @@ async def index_source_background(source_id: UUID, db_url: str):
 # ─────────────────────────────────────────────────────────────────────────
 
 @router.post(
-    "/pdf",
+    "/upload",
     response_model=ApiResponse,
     status_code=202,
 )
 @limiter.limit("5/minute")
-async def add_pdf(
+async def upload_document(
     request: Request,
-    title: str = Form(..., min_length=1, max_length=200, description="Display title for PDF"),
-    file: UploadFile = File(..., description="PDF file to upload"),
+    title: str = Form(..., min_length=1, max_length=200, description="Display title for document"),
+    file: UploadFile = File(..., description="Document file to upload (PDF, DOCX, TXT, MD)"),
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Upload and index a PDF file as a source.
+    Upload and index a document as a source.
+    
+    Supports multiple file types: PDF, DOCX, TXT, MD
     
     Performs async indexing:
-    1. Save PDF file locally (Multer)
+    1. Save document file locally
     2. Create Source record with status="uploaded"
     3. Vector indexing (sync in background)
     4. Upload to Cloudinary (cloud storage)
@@ -103,8 +87,8 @@ async def add_pdf(
     
     Args:
         request: FastAPI request (required for rate limiting)
-        title: Display title for the PDF
-        file: Uploaded PDF file
+        title: Display title for the document
+        file: Uploaded document file (PDF, DOCX, TXT, or MD)
         background_tasks: FastAPI background tasks
         db: Database session
         current_user: Authenticated user
@@ -114,12 +98,21 @@ async def add_pdf(
         Includes status_url for polling progress
     
     Raises:
-        ApiError(400): If file type is not PDF or title is invalid
+        ApiError(400): If file type is unsupported or title is invalid
         ApiError(400): If file size exceeds limit
     """
     # Validate file type
-    if not file.filename or not file.filename.lower().endswith('.pdf'):
-        raise ApiError(400, "File must be a PDF (.pdf)")
+    if not file.filename:
+        raise ApiError(400, "Filename is required")
+    
+    file_ext = file.filename.lower().split(".")[-1] if "." in file.filename else ""
+    supported_types = {"pdf", "docx", "txt", "md", "text", "markdown"}
+    
+    if file_ext not in supported_types:
+        raise ApiError(
+            400, 
+            f"Unsupported file type: {file_ext}. Supported types: PDF, DOCX, TXT, MD, TEXT, MARKDOWN"
+        )
     
     # Validate title
     title = title.strip()
@@ -133,18 +126,41 @@ async def add_pdf(
         db,
         current_user.id,
         title,
-        SourceType.pdf.value,
+        SourceType.pdf.value,  # Use 'pdf' as generic document type for now
         metadata={
             "filename": file.filename,
             "content_type": file.content_type,
+            "file_type": file_ext,  # Store actual file type for later detection
         }
     )
     
-    # Create source index metadata via repository
-    source_index = source_repo.create_source_index(db, source.id, f"pdf_{source.id}")
+    # Upload document to Cloudinary
+    try:
+        cloudinary_result = upload_document_to_cloudinary(file, str(source.id))
+        
+        # Update source metadata with Cloudinary URL
+        source.source_metadata.update({
+            "file_url": cloudinary_result["secure_url"],
+            "cloudinary_public_id": cloudinary_result["public_id"],
+        })
+        db.add(source)
+        db.commit()
+        
+    except ApiError as e:
+        # If Cloudinary upload fails, delete the source and raise error
+        db.delete(source)
+        db.commit()
+        raise
+    except Exception as e:
+        # Unexpected error, rollback
+        db.rollback()
+        raise ApiError(500, f"Failed to upload document: {str(e)}")
     
-    # TODO: Trigger background indexing task
-    # background_tasks.add_task(index_source_background, source.id, db_url)
+    # Create source index metadata via repository
+    source_index = source_repo.create_source_index(db, source.id, f"doc_{source.id}")
+    
+    # Trigger background indexing pipeline
+    background_tasks.add_task(run_indexing_pipeline, str(source.id))
     
     # Update status to indexing
     source_repo.update_source_status(db, source.id, SourceStatus.indexing.value)
@@ -158,14 +174,14 @@ async def add_pdf(
         status=source.status.value,
         collection_name=source_index.collection_name,
         status_url=f"/sources/{source.id}/status",
-        message="PDF accepted for processing. Vector indexing complete, graph indexing in progress.",
+        message="Document accepted for processing. Vector indexing complete, graph indexing in progress.",
         created_at=source.created_at,
     )
     
     return ApiResponse(
         statusCode=202,
         success=True,
-        message="PDF uploaded successfully. Indexing started.",
+        message="Document uploaded successfully. Indexing started.",
         data=response_data,
     )
 
@@ -232,8 +248,8 @@ async def add_github(
     # Create source index metadata via repository
     source_index = source_repo.create_source_index(db, source.id, f"github_{source.id}")
     
-    # TODO: Trigger background indexing task
-    # background_tasks.add_task(index_source_background, source.id, db_url)
+    # Trigger background indexing pipeline
+    background_tasks.add_task(run_indexing_pipeline, str(source.id))
     
     # Update status to indexing
     source_repo.update_source_status(db, source.id, SourceStatus.indexing.value)
@@ -348,7 +364,7 @@ async def get_source(
         title=source.title,
         type=source.type.value,
         status=source.status.value,
-        metadata=source.meta,
+        metadata=source.source_metadata,
         created_at=source.created_at,
     )
     

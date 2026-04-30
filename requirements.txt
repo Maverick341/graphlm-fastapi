@@ -12,6 +12,17 @@ pydantic-settings
 python-dotenv
 python-jose
 python-multipart
+requests
 slowapi
 SQLAlchemy
 uvicorn
+
+# Indexing & LLM Integration
+langchain
+langchain_community
+langchain_openai
+langchain_experimental
+langchain_qdrant
+langchain_neo4j
+qdrant_client
+python-docx

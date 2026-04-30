@@ -74,7 +74,7 @@ def create_source(db: Session, user_id: UUID, title: str, source_type: str, meta
         user_id=user_id,
         title=title,
         type=source_type,
-        metadata=metadata or {}
+        source_metadata=metadata or {}
     )
     db.add(source)
     db.commit()

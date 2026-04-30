@@ -143,7 +143,8 @@ class SourceDetailResponse(BaseModel):
     status: str = Field(description="Indexing status")
     metadata: Dict[str, Any] = Field(
         default_factory=dict,
-        description="Type-specific metadata (pdf or github)"
+        description="Type-specific metadata (pdf or github)",
+        validation_alias="source_metadata"
     )
     created_at: datetime = Field(description="Creation timestamp")
     updated_at: Optional[datetime] = Field(

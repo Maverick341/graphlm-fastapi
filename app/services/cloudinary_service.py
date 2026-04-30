@@ -96,5 +96,72 @@ def delete_avatar_from_cloudinary(public_id: str) -> bool:
         return False
 
 
+def upload_document_to_cloudinary(file, source_id: str, resource_type: str = "auto") -> dict:
+    """
+    Upload document file to Cloudinary.
+
+    Uploads the file to the "documents" folder with the source ID as the public_id.
+    Supports PDF, DOCX, TXT, MD and other document formats.
+
+    Args:
+        file: UploadFile object from FastAPI
+        source_id: Source UUID as string (used in public_id)
+        resource_type: Cloudinary resource type (auto, raw, document, etc.)
+
+    Returns:
+        dict with keys:
+            - secure_url: HTTPS URL of uploaded document
+            - public_id: Cloudinary public ID for deletion
+            - file_type: Original file type
+
+    Raises:
+        ApiError: If upload fails (500)
+    """
+    try:
+        result = cloudinary.uploader.upload(
+            file.file,
+            folder="documents",
+            public_id=f"doc_{source_id}",
+            overwrite=True,
+            resource_type=resource_type,
+        )
+        return {
+            "secure_url": result.get("secure_url"),
+            "public_id": result.get("public_id"),
+            "file_type": result.get("resource_type", "document"),
+        }
+    except Exception as e:
+        logger.error(f"Failed to upload document {source_id}: {e}")
+        raise ApiError(
+            statusCode=500,
+            message="Failed to upload document to storage",
+        )
+
+
+def delete_document_from_cloudinary(public_id: str) -> bool:
+    """
+    Delete document from Cloudinary by public_id.
+
+    Safe to call even if public_id is empty or None.
+    Failures are logged but not raised (graceful degradation).
+
+    Args:
+        public_id: Cloudinary public ID
+
+    Returns:
+        True if successful, False on error
+    """
+    if not public_id:
+        return True
+
+    try:
+        cloudinary.uploader.destroy(public_id)
+        logger.info(f"Deleted document {public_id} from Cloudinary")
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to delete document {public_id} from Cloudinary: {e}")
+        return False
+
+
 # Initialize Cloudinary on module import
 configure_cloudinary()

@@ -41,6 +41,30 @@ class Settings(BaseSettings):
     MAX_AVATAR_FILE_SIZE: int = 1_048_576  # 1MB in bytes
     ALLOWED_IMAGE_TYPES: list = ["image/jpeg", "image/png", "image/webp", "image/gif"]
 
+    # Indexing Configuration - Qdrant (Vector DB)
+    QDRANT_URL: str = "http://localhost:6333"
+    QDRANT_API_KEY: str = ""
+
+    # Indexing Configuration - Neo4j (Graph DB)
+    NEO4J_URI: str = "bolt://localhost:7687"
+    NEO4J_USERNAME: str = "neo4j"
+    NEO4J_PASSWORD: str = ""
+
+    # Indexing Configuration - OpenAI (LLM & Embeddings)
+    OPENAI_API_KEY: str = ""
+    OPENAI_LLM_MODEL: str = "gpt-4o-mini"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    # Indexing Configuration - GitHub
+    GITHUB_TOKEN: str = ""
+    GITHUB_LARGE_REPO_SIZE_KB: int = 50_000
+
+    # Indexing Configuration - Chunking & Concurrency
+    CHUNK_SIZE: int = 1000
+    CHUNK_OVERLAP: int = 200
+    INDEXING_CONCURRENCY: int = 3
+    MAX_DOCUMENT_SIZE_MB: int = 50
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
