@@ -21,6 +21,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 from uuid import UUID
 from typing import Optional, List
+import tempfile
+import os
+import shutil
+import logging
+
+logger = logging.getLogger(__name__)
 
 from app.db.database import get_db
 from app.models.user import User
@@ -121,51 +127,67 @@ async def upload_document(
     
     # TODO: Validate file size (e.g., max 50MB)
     
+    # Save uploaded file to temporary location (PRIMARY indexing source)
+    temp_dir = tempfile.mkdtemp()
+    temp_file_path = os.path.join(temp_dir, file.filename)
+    
+    try:
+        with open(temp_file_path, "wb") as f:
+            content = await file.read()
+            f.write(content)
+    except Exception as e:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise ApiError(500, f"Failed to save file: {str(e)}")
+    
     # Create source via repository with initial status
     source = source_repo.create_source(
         db,
         current_user.id,
         title,
-        SourceType.pdf.value,  # Use 'pdf' as generic document type for now
+        SourceType.document.value,
         metadata={
             "filename": file.filename,
             "content_type": file.content_type,
-            "file_type": file_ext,  # Store actual file type for later detection
+            "file_type": file_ext,
+            "temp_file_path": temp_file_path,  # PRIMARY: local temp file
+            "temp_dir": temp_dir,  # Directory to clean up later
         }
     )
     
-    # Upload document to Cloudinary
+    # Upload to Cloudinary as FALLBACK storage (optional, non-blocking)
     try:
-        cloudinary_result = upload_document_to_cloudinary(file, str(source.id))
-        
-        # Update source metadata with Cloudinary URL
-        source.source_metadata.update({
-            "file_url": cloudinary_result["secure_url"],
-            "cloudinary_public_id": cloudinary_result["public_id"],
-        })
-        db.add(source)
-        db.commit()
-        
-    except ApiError as e:
-        # If Cloudinary upload fails, delete the source and raise error
-        db.delete(source)
-        db.commit()
-        raise
+        # Re-open temp file for Cloudinary upload (UploadFile already consumed)
+        with open(temp_file_path, "rb") as f:
+            # Create a simple object with .file attribute to match upload_document_to_cloudinary expectations
+            class FileWrapper:
+                def __init__(self, file_obj):
+                    self.file = file_obj
+            
+            wrapped_file = FileWrapper(f)
+            cloudinary_result = upload_document_to_cloudinary(wrapped_file, str(source.id))
+            source.source_metadata = {
+                **(source.source_metadata or {}),
+                "cloudinary_url": cloudinary_result["secure_url"],  # FALLBACK
+                "cloudinary_public_id": cloudinary_result["public_id"],
+            }
+            db.commit()
+            db.refresh(source)
+            print(f"[Upload] Successfully uploaded to Cloudinary: {cloudinary_result['secure_url']}")
     except Exception as e:
-        # Unexpected error, rollback
-        db.rollback()
-        raise ApiError(500, f"Failed to upload document: {str(e)}")
+        # Non-blocking: Cloudinary upload failure doesn't block indexing
+        logger.warning(f"Cloudinary upload failed for source {source.id} (will use local temp file): {str(e)}")
     
     # Create source index metadata via repository
     source_index = source_repo.create_source_index(db, source.id, f"doc_{source.id}")
     
-    # Trigger background indexing pipeline
-    background_tasks.add_task(run_indexing_pipeline, str(source.id))
-    
     # Update status to indexing
     source_repo.update_source_status(db, source.id, SourceStatus.indexing.value)
-    source = source_repo.get_source_by_id(db, source.id)
     
+    # Trigger background indexing pipeline
+    background_tasks.add_task(run_indexing_pipeline, str(source.id))
+
+    source = source_repo.get_source_by_id(db, source.id)
+
     # Build response
     response_data = AddSourceResponse(
         source_id=source.id,
@@ -173,8 +195,9 @@ async def upload_document(
         type=source.type.value,
         status=source.status.value,
         collection_name=source_index.collection_name,
+        file_url=source.source_metadata.get("cloudinary_url") if source.source_metadata else None,
         status_url=f"/sources/{source.id}/status",
-        message="Document accepted for processing. Vector indexing complete, graph indexing in progress.",
+        message="Document accepted for processing. Vector indexing will run; graph indexing runs in background. Poll status endpoint for progress.",
         created_at=source.created_at,
     )
     
@@ -241,18 +264,19 @@ async def add_github(
         metadata={
             "repo_url": body.repo_url,
             "branch": body.branch,
-            "include_extensions": body.include_extensions,
+            "include_extensions": body.include_extensions or [],
         }
     )
     
     # Create source index metadata via repository
     source_index = source_repo.create_source_index(db, source.id, f"github_{source.id}")
     
+    # Update status to indexing
+    source_repo.update_source_status(db, source.id, SourceStatus.indexing.value)
+
     # Trigger background indexing pipeline
     background_tasks.add_task(run_indexing_pipeline, str(source.id))
     
-    # Update status to indexing
-    source_repo.update_source_status(db, source.id, SourceStatus.indexing.value)
     source = source_repo.get_source_by_id(db, source.id)
     
     # Build response
@@ -263,7 +287,7 @@ async def add_github(
         status=source.status.value,
         collection_name=source_index.collection_name,
         status_url=f"/sources/{source.id}/status",
-        message="GitHub repository accepted for processing. Vector indexing complete, graph indexing in progress.",
+        message="Repository accepted for processing. Vector indexing will run; graph indexing runs in background. Poll status endpoint for progress.",
         created_at=source.created_at,
     )
     
@@ -463,8 +487,21 @@ async def delete_source(
     
     verify_ownership(source.user_id, current_user.id, "source")
     
+    # Clean up Cloudinary backup if it exists (optional, non-blocking)
+    try:
+        cloudinary_public_id = source.source_metadata.get("cloudinary_public_id") if source.source_metadata else None
+        if cloudinary_public_id:
+            delete_document_from_cloudinary(cloudinary_public_id)
+            print(f"[Delete] Cleaned up Cloudinary file for source {source_id}")
+    except Exception as e:
+        logger.warning(f"Failed to delete Cloudinary backup for source {source_id}: {str(e)}")
+    
     # TODO: Delete Qdrant collection
     # TODO: Delete Neo4j entities (non-fatal if fails)
+
+    # Remove from all sessions (many-to-many cleanup)
+    source.sessions.clear()
+    db.commit()
     
     # Delete source via repository (cascade deletes SourceIndex via SQLAlchemy relationship)
     source_repo.delete_source(db, source_id)

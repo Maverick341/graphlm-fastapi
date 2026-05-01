@@ -215,61 +215,7 @@ def _get_language_splitter(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# PDF Loader
-# ─────────────────────────────────────────────────────────────────────────
-
-def load_and_prepare_pdf(file_path: str) -> list:
-    """
-    Load and split a PDF file from local path or Cloudinary URL.
-    
-    Args:
-        file_path: Path to PDF file (local path or Cloudinary URL)
-    
-    Returns:
-        List of split LangChain Document objects with metadata
-    
-    Raises:
-        ApiError: If PDF loading or splitting fails
-    """
-    try:
-        if not file_path:
-            raise ApiError(400, "PDF file path is required")
-        
-        # Ensure we have a local path (download from URL if needed)
-        local_path = _ensure_local_path(file_path, "pdf")
-        
-        try:
-            loader = PyPDFLoader(local_path)
-            docs = loader.load()
-            
-            if not docs:
-                raise ApiError(400, "Failed to load PDF or PDF is empty")
-            
-            # Split documents
-            splitter = RecursiveCharacterTextSplitter(**SPLITTER_CONFIG)
-            split_docs = splitter.split_documents(docs)
-            
-            if not split_docs:
-                raise ApiError(400, "Failed to split PDF documents")
-            
-            return split_docs
-        
-        finally:
-            # Clean up temporary file if it was downloaded
-            if file_path.startswith("http") and os.path.exists(local_path):
-                try:
-                    os.unlink(local_path)
-                except Exception:
-                    pass
-    
-    except ApiError:
-        raise
-    except Exception as e:
-        raise ApiError(500, f"Failed to load and split PDF: {str(e)}")
-
-
-# ─────────────────────────────────────────────────────────────────────────
-# Document Loaders (PDF, DOCX, TXT)
+# Document Loaders (PDF, DOCX, TXT, MD)
 # ─────────────────────────────────────────────────────────────────────────
 
 def load_and_prepare_document(file_path: str, file_type: str = None) -> list:

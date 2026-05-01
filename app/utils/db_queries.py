@@ -70,5 +70,5 @@ def build_source_status_response(source: Source) -> SourceStatusResponse:
         vector=vector_status,
         graph=graph_status,
         collection_name=source_index.collection_name if source_index else None,
-        error_message=None,  # TODO: Add error_message field to Source model if needed
+        error_message=source_index.error_message if source_index else None,
     )

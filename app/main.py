@@ -11,8 +11,12 @@ from app.api.routes.sources import router as sources
 from app.api.limiter import limiter
 from app.utils.api_error import register_exception_handlers
 from app.core.config import settings
+from app.services.cloudinary_service import configure_cloudinary
 
 app = FastAPI(title="FastAPI Auth")
+
+# Initialize Cloudinary on startup
+configure_cloudinary()
 
 app.add_middleware(
     CORSMiddleware,
@@ -52,4 +56,4 @@ if __name__ == "__main__":
     host = "127.0.0.1"
 
     print(f"🚀 Starting server on http://{host}:{port}")
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run("app.main:app", host=host, port=port, reload=True)

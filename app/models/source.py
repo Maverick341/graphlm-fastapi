@@ -10,7 +10,7 @@ from app.db.database import Base
 from app.models.associations import chat_session_sources
 
 class SourceType(enum.Enum):
-    pdf        = "pdf"
+    document   = "document"
     github     = "github"
 
 class SourceStatus(enum.Enum):

@@ -24,27 +24,24 @@ import asyncio
 from datetime import datetime
 from sqlalchemy.orm import Session
 from sqlalchemy import update
+import shutil
+import os
 
 from app.db.database import SessionLocal
 from app.models.source import Source, SourceStatus
 from app.models.source_index import SourceIndex
 from app.services.indexing.ingestion import (
-    load_and_prepare_pdf,
-    load_and_prepare_github,
     load_and_prepare_document,
+    load_and_prepare_github,
 )
-from app.services.indexing.vector_index import (
-    index_pdf_source,
-    index_github_source,
-    index_document_source,
-    delete_qdrant_collection,
-)
+from app.services.indexing.vector_index import index_to_vector_store, delete_qdrant_collection
 from app.services.indexing.graph_index import (
     build_pdf_graph,
     build_github_graph,
     delete_graph_by_source_id,
 )
 from app.utils.api_error import ApiError
+from app.repositories import source_repo
 
 
 async def run_indexing_pipeline(source_id: str) -> None:
@@ -92,46 +89,51 @@ async def run_indexing_pipeline(source_id: str) -> None:
         db.commit()
 
         # ──────────────────────────────────────────────────────────────
-        # Phase 1: Load and Prepare Documents
+        # Phase 1: Load and Prepare Documents (ONLY PLACE)
         # ──────────────────────────────────────────────────────────────
         try:
-            effective_file_path = None
-
-            if source.type.value == "pdf":
-                # Check if this is a multi-format document (file_type stored in metadata)
-                actual_file_type = source.source_metadata.get("file_type")
-                local_path = source.source_metadata.get("file_path") or source.source_metadata.get("filename")
-                file_url = source.source_metadata.get("file_url")
-
-                if actual_file_type and actual_file_type not in ("pdf", ""):
-                    loader_type = "document"
-                    load_fn = lambda path: load_and_prepare_document(path, actual_file_type)
+            if source.type.value == "document":
+                file_type = source.source_metadata.get("file_type")
+                
+                # PRIMARY: Try temp file first
+                temp_file_path = source.source_metadata.get("temp_file_path")
+                file_path = None
+                
+                if temp_file_path and os.path.exists(temp_file_path):
+                    file_path = temp_file_path
+                    print(f"[Pipeline] Using temp file for source {source_id}: {temp_file_path}")
+                # FALLBACK: Use Cloudinary URL if temp file missing
+                elif source.source_metadata.get("cloudinary_url"):
+                    file_path = source.source_metadata.get("cloudinary_url")
+                    print(f"[Pipeline] Temp file missing, falling back to Cloudinary for source {source_id}")
                 else:
-                    loader_type = "pdf"
-                    load_fn = load_and_prepare_pdf
-
-                last_error = None
-                for candidate in (local_path, file_url):
-                    if not candidate:
-                        continue
-                    try:
-                        docs = await asyncio.to_thread(load_fn, candidate)
-                        effective_file_path = candidate
-                        break
-                    except Exception as e:
-                        last_error = e
-                        if candidate == local_path and file_url:
-                            print(
-                                f"[Pipeline] Local load failed for source {source_id}, retrying via file_url"
+                    raise ApiError(400, "No file path or Cloudinary URL found in source metadata")
+                
+                if not file_type:
+                    raise ApiError(400, "File type not found in source metadata")
+                
+                try:
+                    docs = await asyncio.to_thread(
+                        load_and_prepare_document,
+                        file_path,
+                        file_type,
+                    )
+                except Exception as e:
+                    # If temp file failed and we have Cloudinary as backup
+                    if temp_file_path and source.source_metadata.get("cloudinary_url"):
+                        print(f"[Pipeline] Temp file failed ({str(e)}), retrying with Cloudinary fallback")
+                        try:
+                            docs = await asyncio.to_thread(
+                                load_and_prepare_document,
+                                source.source_metadata.get("cloudinary_url"),
+                                file_type,
                             )
-
-                if not effective_file_path:
-                    if last_error:
-                        raise last_error
-                    raise ApiError(400, "File path not found in metadata")
+                        except Exception as e2:
+                            raise ApiError(500, f"Both temp file and Cloudinary failed: {str(e2)}")
+                    else:
+                        raise
 
             elif source.type.value == "github":
-                # For GitHub: extract repo details from metadata
                 repo_url = source.source_metadata.get("repo_url")
                 branch = source.source_metadata.get("branch", "main")
                 include_ext = source.source_metadata.get("include_extensions") or []
@@ -147,10 +149,9 @@ async def run_indexing_pipeline(source_id: str) -> None:
                     access_token,
                     include_ext,
                 )
-                loader_type = "github"
 
             else:
-                raise ApiError(400, f"Unsupported source type: {source.type}")
+                raise ApiError(400, f"Unsupported source type: {source.type.value}")
 
             print(f"[Pipeline] Loaded {len(docs)} documents for source {source_id}")
 
@@ -169,52 +170,24 @@ async def run_indexing_pipeline(source_id: str) -> None:
         try:
             collection_name = f"src_{source_id}"
 
-            if loader_type == "pdf":
-                file_path = effective_file_path or source.source_metadata.get("file_url")
-                vector_result = await asyncio.to_thread(
-                    index_pdf_source, file_path, collection_name, source_id
-                )
-
-            elif loader_type == "document":
-                # Multi-format document (docx, txt, md, etc.)
-                file_path = effective_file_path or source.source_metadata.get("file_url")
-                actual_file_type = source.source_metadata.get("file_type")
-                vector_result = await asyncio.to_thread(
-                    index_document_source,
-                    file_path,
-                    collection_name,
-                    source_id,
-                    actual_file_type,
-                )
-            
-            else:  # github
-                repo_url = source.source_metadata.get("repo_url")
-                branch = source.source_metadata.get("branch", "main")
-                include_ext = source.source_metadata.get("include_extensions") or []
-                
-                vector_result = await asyncio.to_thread(
-                    index_github_source,
-                    repo_url,
-                    collection_name,
-                    source_id,
-                    branch,
-                    include_ext,
-                )
+            # Vector indexing operates on already split docs (from ingestion)
+            vector_result = await asyncio.to_thread(
+                index_to_vector_store,
+                docs,
+                collection_name,
+                source_id,
+                source.type.value if hasattr(source, "type") else loader_type,
+            )
 
             print(
                 f"[Pipeline] Vector indexing complete for source {source_id}: "
                 f"{vector_result.get('vectors_added', 0)} vectors"
             )
 
-            # Update SourceIndex with vector completion timestamp
-            source_index = db.query(SourceIndex).filter(SourceIndex.source_id == source_id).first()
-            if not source_index:
-                source_index = SourceIndex(source_id=source_id)
-                db.add(source_index)
-
-            source_index.vector_indexed = True
-            source_index.vector_indexed_at = datetime.utcnow()
-            db.commit()
+            # Update SourceIndex with vector completion using repo helper
+            updated = source_repo.set_vector_indexed(db, source_id, True)
+            if not updated:
+                raise ApiError(500, "SourceIndex missing for source")
 
         except Exception as e:
             print(f"[Pipeline] Vector indexing failed for source {source_id}: {e}")
@@ -238,31 +211,41 @@ async def run_indexing_pipeline(source_id: str) -> None:
         # Phase 3: Graph Indexing (Async Background, Non-Fatal)
         # ──────────────────────────────────────────────────────────────
         try:
-            if loader_type == "pdf" or loader_type == "document":
-                # Both PDF and multi-format documents use generic entity extraction
-                graph_result = await build_pdf_graph(source_id, docs)
-            else:  # github
-                graph_result = await build_github_graph(source_id, docs)
+            if source.type.value == "github":
+                result = await build_github_graph(source_id, docs)
+            else:
+                result = await build_pdf_graph(source_id, docs)
 
             print(
                 f"[Pipeline] Graph indexing complete for source {source_id}: "
-                f"{graph_result.get('nodes_added', 0)} nodes, "
-                f"{graph_result.get('relationships_added', 0)} relationships"
+                f"{result.get('nodes_added', 0)} nodes, "
+                f"{result.get('relationships_added', 0)} relationships"
             )
 
-            # Update SourceIndex with graph completion
-            source_index = db.query(SourceIndex).filter(SourceIndex.source_id == source_id).first()
-            if source_index:
-                source_index.graph_indexed = True
-                source_index.graph_indexed_at = datetime.utcnow()
-                source_index.entity_count = graph_result.get("nodes_added", 0)
-                source_index.relation_count = graph_result.get("relationships_added", 0)
-                db.commit()
+            # Update SourceIndex with graph completion using repo helper
+            source_repo.set_graph_indexed(
+                db,
+                source_id,
+                True,
+                entity_count=result.get('nodes_added', 0),
+                relation_count=result.get('relationships_added', 0),
+            )
 
         except Exception as e:
             # Non-fatal: log error but don't block chat
             print(f"[Pipeline] Graph indexing failed for source {source_id} (non-fatal): {e}")
-            # Continue without updating graph status
+            # Record graph failure information on SourceIndex for frontend visibility
+            try:
+                source_repo.set_graph_indexed(
+                    db,
+                    source_id,
+                    False,
+                    entity_count=0,
+                    relation_count=0,
+                    error_message=str(e),
+                )
+            except Exception as e2:
+                print(f"[Pipeline] Failed to record graph error for source {source_id}: {e2}")
 
         print(f"[Pipeline] Pipeline complete for source {source_id}")
 
@@ -270,5 +253,14 @@ async def run_indexing_pipeline(source_id: str) -> None:
         print(f"[Pipeline] Unexpected error in pipeline for source {source_id}: {e}")
 
     finally:
+        # Cleanup temporary files
+        try:
+            temp_dir = source.source_metadata.get("temp_dir") if source else None
+            if temp_dir and os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                print(f"[Pipeline] Cleaned up temporary directory for source {source_id}")
+        except Exception as e:
+            print(f"[Pipeline] Error cleaning up temp files for source {source_id}: {e}")
+        
         if db:
             db.close()

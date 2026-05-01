@@ -247,7 +247,7 @@ class AddSourceResponse(BaseModel):
     Response when adding a new source (PDF or GitHub).
     
     Returned with 202 Accepted status for async processing.
-    Includes status URL for polling progress.
+    Includes status URL for polling progress and file URL for preview.
     """
     source_id: UUID = Field(description="Newly created source ID")
     title: str = Field(description="Source title")
@@ -256,6 +256,10 @@ class AddSourceResponse(BaseModel):
     collection_name: Optional[str] = Field(
         default=None,
         description="Qdrant collection name for this source"
+    )
+    file_url: Optional[str] = Field(
+        default=None,
+        description="Cloudinary file URL for preview (documents only)"
     )
     status_url: str = Field(
         description="URL to poll for indexing progress"
@@ -270,11 +274,12 @@ class AddSourceResponse(BaseModel):
             "example": {
                 "source_id": "323e4567-e89b-12d3-a456-426614174002",
                 "title": "architecture.pdf",
-                "type": "pdf",
+                "type": "document",
                 "status": "indexing",
-                "collection_name": "pdf_323e4567e89b12d3a456426614174002",
+                "collection_name": "doc_323e4567e89b12d3a456426614174002",
+                "file_url": "https://res.cloudinary.com/lonewolf194/image/upload/.../doc_323e4567e89b12d3a456426614174002.pdf",
                 "status_url": "/api/v1/sources/323e4567-e89b-12d3-a456-426614174002/status",
-                "message": "PDF accepted for processing. Vector indexing complete, graph indexing in progress.",
+                "message": "Document accepted for processing. Vector indexing complete, graph indexing in progress.",
                 "created_at": "2026-04-30T10:25:00Z"
             }
         }

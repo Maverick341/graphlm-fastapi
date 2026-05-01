@@ -15,6 +15,7 @@ from typing import Optional, List
 from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
+from datetime import datetime
 
 from app.models.source import Source
 from app.models.source_index import SourceIndex
@@ -161,6 +162,60 @@ def create_source_index(db: Session, source_id: UUID, collection_name: str) -> S
         graph_indexed=False,
     )
     db.add(source_index)
+    db.commit()
+    db.refresh(source_index)
+    return source_index
+
+
+def set_vector_indexed(db: Session, source_id: UUID, vector_indexed: bool = True) -> Optional[SourceIndex]:
+    """Set vector_indexed flag and optional timestamp on SourceIndex."""
+    source_index = db.query(SourceIndex).filter(SourceIndex.source_id == source_id).first()
+    if not source_index:
+        return None
+
+    source_index.vector_indexed = bool(vector_indexed)
+    source_index.vector_indexed_at = datetime.utcnow() if vector_indexed else None
+    db.commit()
+    db.refresh(source_index)
+    return source_index
+
+
+def set_graph_indexed(
+    db: Session,
+    source_id: UUID,
+    graph_indexed: bool = True,
+    entity_count: int | None = None,
+    relation_count: int | None = None,
+    error_message: str | None = None,
+) -> Optional[SourceIndex]:
+    """Set graph_indexed flag, timestamps, and optional entity/relation counts on SourceIndex."""
+    source_index = db.query(SourceIndex).filter(SourceIndex.source_id == source_id).first()
+    if not source_index:
+        return None
+
+    source_index.graph_indexed = bool(graph_indexed)
+    source_index.graph_indexed_at = datetime.utcnow() if graph_indexed else None
+    if entity_count is not None:
+        try:
+            source_index.entity_count = int(entity_count)
+        except Exception:
+            source_index.entity_count = None
+    if relation_count is not None:
+        try:
+            source_index.relation_count = int(relation_count)
+        except Exception:
+            source_index.relation_count = None
+    # Record error message when graph indexing fails
+    if error_message:
+        try:
+            source_index.error_message = str(error_message)[:500]
+        except Exception:
+            source_index.error_message = None
+    else:
+        # Clear previous error message on successful indexing
+        if graph_indexed:
+            source_index.error_message = None
+
     db.commit()
     db.refresh(source_index)
     return source_index
