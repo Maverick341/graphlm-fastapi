@@ -162,6 +162,8 @@ async def get_session(
     # Build response with message count
     response_data = SessionResponse.model_validate(session)
     response_data.message_count = session_repo.get_message_count(db, session.id)
+    response_data.source_count = len(session.sources)
+    response_data.sources = [s.id for s in session.sources]
     
     return ApiResponse(
         statusCode=200,
@@ -280,8 +282,15 @@ async def attach_sources(
             "One or more sources not found or do not belong to you"
         )
     
-    # Clear existing sources and add new ones
-    session.sources = sources
+    existing_ids = {s.id for s in session.sources}
+    
+    # Many-to-many attach (append, avoid duplicates)
+
+    # session.sources.clear()  # <-- Do not clear, just append new sources
+    for source in sources:
+        if source.id not in existing_ids:
+            session.sources.append(source)
+
     db.commit()
     db.refresh(session)
     

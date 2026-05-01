@@ -23,6 +23,17 @@ class SourceIndex(Base):
     entity_count:     Mapped[int|None]       = mapped_column(Integer, nullable=True)
     relation_count:   Mapped[int|None]       = mapped_column(Integer, nullable=True)
 
+    error_message: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Indexing logic (placeholder, implement in service layer)
+    # try:
+    #     # indexing logic
+    #     pass
+    # except Exception as e:
+    #     source_index.error_message = str(e)[:500]
+    #     source.status = "failed"
+    #     db.commit()
+
     # Shared config
     provider:        Mapped[str]      = mapped_column(String, default="qdrant+neo4j")
     embedding_model: Mapped[str]      = mapped_column(String, default="text-embedding-3-small")

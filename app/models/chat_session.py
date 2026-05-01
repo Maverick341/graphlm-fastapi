@@ -6,6 +6,7 @@ from sqlalchemy.sql import func
 from datetime import datetime
 from typing import List
 from app.db.database import Base
+from app.models.associations import chat_session_sources
 
 class ChatSession(Base):
     __tablename__ = "chat_sessions"
@@ -25,8 +26,9 @@ class ChatSession(Base):
         back_populates="session",
         cascade="all, delete-orphan"
     )
+
     sources: Mapped[List["Source"]] = relationship(
         "Source",
-        back_populates="session",
-        cascade="all, delete-orphan"
+        secondary=chat_session_sources,
+        back_populates="sessions",
     )

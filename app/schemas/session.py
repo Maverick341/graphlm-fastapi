@@ -162,6 +162,14 @@ class SessionResponse(BaseModel):
         default=None,
         description="Total number of messages in session (optional)"
     )
+    source_count: Optional[int] = Field(
+        default=None,
+        description="Total number of sources attached to session (optional)"
+    )
+    sources: Optional[List[UUID]] = Field(
+        default=None,
+        description="List of attached source IDs (optional)"
+    )
 
     class Config:
         from_attributes = True
@@ -180,7 +188,8 @@ class SessionResponse(BaseModel):
                         "created_at": "2026-04-30T10:25:00Z"
                     }
                 ],
-                "message_count": 5
+                "message_count": 5,
+                "source_count": 1
             }
         }
 

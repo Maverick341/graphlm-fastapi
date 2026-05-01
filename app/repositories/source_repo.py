@@ -18,6 +18,7 @@ from sqlalchemy import desc
 
 from app.models.source import Source
 from app.models.source_index import SourceIndex
+from app.models.chat_session import ChatSession
 
 
 def get_source_by_id(db: Session, source_id: UUID) -> Optional[Source]:
@@ -163,3 +164,8 @@ def create_source_index(db: Session, source_id: UUID, collection_name: str) -> S
     db.commit()
     db.refresh(source_index)
     return source_index
+
+
+def get_sources_by_session(db: Session, session_id: UUID) -> list[Source]:
+    session = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+    return session.sources if session else []
