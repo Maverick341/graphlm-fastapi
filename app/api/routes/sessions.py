@@ -34,7 +34,7 @@ from app.schemas.session import (
 )
 from app.utils.api_error import ApiError
 from app.utils.db_queries import verify_ownership
-from app.repositories import session_repo
+from app.repositories import session_repo, source_repo
 from app.api.limiter import limiter
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
@@ -304,6 +304,86 @@ async def attach_sources(
         statusCode=200,
         success=True,
         message=f"Attached {len(sources)} source(s) to session",
+        data=response_data,
+    )
+
+# Detach a source from a session using the DELETE route below.
+
+
+@router.delete("/{session_id}/sources/{source_id}", response_model=ApiResponse)
+@limiter.limit("5/minute")
+async def detach_source_from_session(
+    request: Request,
+    session_id: UUID,
+    source_id: UUID,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Detach a source from a chat session.
+
+    Args:
+        session_id: Session ID
+        source_id: Source ID to detach
+        db: Database session
+        current_user: Authenticated user
+
+    Returns:
+        ApiResponse with updated SessionResponse
+
+    Raises:
+        ApiError(404): If session or source not found
+        ApiError(403): If session or source doesn't belong to user
+        ApiError(400): If source not attached to session
+    """
+    session = session_repo.get_session_by_id(db, session_id)
+    if not session:
+        raise ApiError(404, "Session not found")
+
+    verify_ownership(session.user_id, current_user.id, "session")
+
+    source = source_repo.get_source_by_id(db, source_id)
+    if not source:
+        raise ApiError(404, "Source not found")
+
+    verify_ownership(source.user_id, current_user.id, "source")
+
+    # Prevent modification after chat starts (same rule as attach)
+    message_count = session_repo.get_message_count(db, session.id)
+    if message_count > 0:
+        raise ApiError(
+            400,
+            "Cannot detach sources from a session with existing messages."
+        )
+
+
+    # Ensure source is attached to session
+    attached = None
+    for s in session.sources:
+        if s.id == source.id:
+            attached = s
+            break
+
+    if not attached:
+        raise ApiError(400, "Source not attached to this session")
+
+    if len(session.sources) == 1:
+        raise ApiError(400, "Session must have at least one source")
+
+    session.sources.remove(attached)
+
+    db.commit()
+    db.refresh(session)
+
+    response_data = SessionResponse.model_validate(session)
+    response_data.message_count = session_repo.get_message_count(db, session.id)
+    response_data.source_count = len(session.sources)
+    response_data.source_ids = [s.id for s in session.sources]
+
+    return ApiResponse(
+        statusCode=200,
+        success=True,
+        message="Source detached from session successfully",
         data=response_data,
     )
 
