@@ -53,6 +53,8 @@ from app.repositories import source_repo
 from app.api.limiter import limiter
 from app.services.indexing.pipeline import run_indexing_pipeline
 from app.services.cloudinary_service import upload_document_to_cloudinary, delete_document_from_cloudinary
+from app.services.indexing.vector_index import delete_qdrant_collection
+from app.services.indexing.graph_index import delete_graph_by_source_id
 
 router = APIRouter(prefix="/sources", tags=["sources"])
 
@@ -496,9 +498,43 @@ async def delete_source(
     except Exception as e:
         logger.warning(f"Failed to delete Cloudinary backup for source {source_id}: {str(e)}")
     
-    # TODO: Delete Qdrant collection
-    # TODO: Delete Neo4j entities (non-fatal if fails)
-
+    
+    # Delete from Qdrant (vector index)
+    qdrant_deletion_status = None
+    qdrant_error = None
+    try:
+        qdrant_deletion_status = delete_qdrant_collection(f"src_{source_id}")
+    except Exception as e:
+        qdrant_error = str(e)
+        qdrant_deletion_status = {"status": "error", "collection": f"src_{source_id}", "error": qdrant_error}
+    
+    # Delete from Neo4j (graph index)
+    neo4j_deletion_status = None
+    neo4j_error = None
+    try:
+        neo4j_deletion_status = await delete_graph_by_source_id(str(source_id))
+    except Exception as e:
+        neo4j_error = str(e)
+        neo4j_deletion_status = {"status": "error", "source_id": str(source_id), "error": neo4j_error}
+   
+    # Check for deletion failures and raise error if any occurred
+    qdrant_success = qdrant_deletion_status and qdrant_deletion_status.get("status") == "ok"
+    neo4j_success = neo4j_deletion_status and neo4j_deletion_status.get("status") == "ok"
+    
+    if not (qdrant_success and neo4j_success):
+        errors = []
+        if not qdrant_success:
+            errors.append({"index": "qdrant", "error": qdrant_error or "Unknown error"})
+        if not neo4j_success:
+            errors.append({"index": "neo4j", "error": neo4j_error or "Unknown error"})
+        
+        raise ApiError(
+            500,
+            f"Failed to clean up indexes for source {source_id}",
+            code="INDEX_CLEANUP_FAILED",
+            errors=errors
+        )
+    
     # Remove from all sessions (many-to-many cleanup)
     source.sessions.clear()
     db.commit()
@@ -506,10 +542,12 @@ async def delete_source(
     # Delete source via repository (cascade deletes SourceIndex via SQLAlchemy relationship)
     source_repo.delete_source(db, source_id)
     
-    # Build response
+    # Build response (success case only)
     response_data = DeleteSourceResponse(
         source_id=source_id,
         message="Source deleted. Vector and graph indexes cleaned up.",
+        qdrant_deletion_status=qdrant_deletion_status,
+        neo4j_deletion_status=neo4j_deletion_status,
     )
     
     return ApiResponse(

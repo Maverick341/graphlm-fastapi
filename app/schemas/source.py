@@ -324,15 +324,26 @@ class DeleteSourceResponse(BaseModel):
     """
     Response after deleting a source.
     
-    Confirms deletion and cleanup of indexes.
+    Confirms deletion and cleanup of indexes (Qdrant + Neo4j).
+    Includes status details from each deletion operation.
     """
     source_id: UUID = Field(description="Deleted source ID")
     message: str = Field(description="Confirmation message")
+    qdrant_deletion_status: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Qdrant collection deletion result"
+    )
+    neo4j_deletion_status: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Neo4j graph deletion result"
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
                 "source_id": "323e4567-e89b-12d3-a456-426614174002",
-                "message": "Source deleted. Vector and graph indexes cleaned up."
+                "message": "Source deleted. Vector and graph indexes cleaned up.",
+                "qdrant_deletion_status": {"status": "ok", "collection": "src_323e4567e89b12d3a456426614174002"},
+                "neo4j_deletion_status": {"status": "ok", "source_id": "323e4567-e89b-12d3-a456-426614174002"}
             }
         }
