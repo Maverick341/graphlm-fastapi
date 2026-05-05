@@ -6,6 +6,7 @@ email-validator
 fastapi
 fastapi-mail
 jinja2
+mem0ai
 passlib
 psycopg2-binary
 pydantic
