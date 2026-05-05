@@ -2,6 +2,8 @@ import sys
 import os
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+import alembic_postgresql_enum
+
 
 # Fix import path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))

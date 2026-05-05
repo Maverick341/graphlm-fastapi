@@ -10,6 +10,7 @@ from app.db.database import Base
 class MessageRole(enum.Enum):
     user      = "user"
     assistant = "assistant"
+    system   = "system"
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
