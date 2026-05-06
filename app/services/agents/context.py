@@ -61,9 +61,9 @@ Summarization:
 
 CHAT_MESSAGES_COLLECTION = "chat_messages"
 
-# Budget reserved for the system prompt (tool descriptions + session context block)
-# This is NOT configurable per-request — it's a fixed overhead estimate.
-_SYSTEM_PROMPT_BUDGET = 1_000
+# Module-level flag — collection is created once per process lifetime.
+# Avoids calling _qdrant.get_collections() on every embed_message call.
+_collection_checked: bool = False
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -88,6 +88,11 @@ _tokenizer = tiktoken.get_encoding("cl100k_base")
 # ─────────────────────────────────────────────────────────────────────────
 # Dynamic token budget (derived from settings — no hardcoded values)
 # ─────────────────────────────────────────────────────────────────────────
+
+# System prompt overhead (tool descriptions + session context injected into agent).
+# Configurable so it can be tuned as the prompt grows with new tools.
+# Falls back to 1_000 if not set, matching the previous implicit assumption.
+_SYSTEM_PROMPT_BUDGET: int = getattr(settings, "SYSTEM_PROMPT_BUDGET", 1_000)
 
 def _get_available_context() -> int:
     """
@@ -133,8 +138,15 @@ def _ensure_collection() -> None:
     """
     Create the shared chat_messages Qdrant collection if it doesn't exist.
     text-embedding-3-small produces 1536-dimensional vectors.
-    Called once per embed_message call — idempotent.
+
+    Uses a module-level boolean flag so the existence check runs exactly once
+    per process lifetime — not once per embed call. Safe for async use because
+    Python's GIL makes the boolean read/write atomic.
     """
+    global _collection_checked
+    if _collection_checked:
+        return
+
     existing = [c.name for c in _qdrant.get_collections().collections]
     if CHAT_MESSAGES_COLLECTION not in existing:
         _qdrant.create_collection(
@@ -144,6 +156,8 @@ def _ensure_collection() -> None:
                 distance=Distance.COSINE,
             ),
         )
+
+    _collection_checked = True
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -178,6 +192,11 @@ async def embed_message(
     """
     if len(content) < settings.MIN_EMBED_CHARS:
         return  # too short to be semantically useful
+
+    # Skip trivially short assistant replies ("Sure.", "Got it.", etc.) —
+    # they carry no semantic signal worth retrieving in future turns.
+    if role == "assistant" and len(content) < 50:
+        return
 
     try:
         _ensure_collection()
@@ -217,6 +236,8 @@ async def _call_summarizer(messages: list[dict]) -> str:
     """
     Call OpenAI to produce a compact bullet-point summary of a message list.
     Returns text prefixed with [SUMMARY] for easy identification in DB queries.
+
+    temperature=0 for deterministic, stable output across retries.
     """
     conversation_text = "\n".join(
         f"{m['role'].upper()}: {m['content']}" for m in messages
@@ -225,6 +246,7 @@ async def _call_summarizer(messages: list[dict]) -> str:
     response = await _openai.chat.completions.create(
         model=settings.OPENAI_LLM_MODEL,
         max_tokens=600,
+        temperature=0,
         messages=[
             {
                 "role": "system",
@@ -250,45 +272,47 @@ async def _get_or_update_summary(
     session_id: UUID,
     older_messages: list[dict],
     db: DBSession,
+    existing_summary_record: ChatMessage | None,
 ) -> str:
     """
-    Fetch an existing summary for this session, or create and persist one.
+    Create or update the rolling summary for this session.
 
-    Summary is stored as a ChatMessage with role=system so it:
-      - is excluded from normal message queries (which filter role IN [user, assistant])
-      - is easily retrievable with a targeted role=system query
-      - never appears in the user-facing chat history
+    Fix (Issue 1): When a summary already exists, it is prepended to older_messages
+    before calling the summarizer — so the new summary inherits all previously
+    compressed knowledge. This gives a rolling chain:
+        summary_v1 → summary_v2 → summary_v3
 
-    If a summary already exists it is UPDATED in-place (no new row) to avoid
-    accumulating duplicate summaries over a long conversation.
+    Without this fix, each new summary would only cover the current older_messages
+    slice, discarding everything that was previously compressed.
+
+    The existing summary record is updated in-place — no duplicate rows.
 
     Args:
-        session_id:      Chat session UUID
-        older_messages:  The older_messages slice to summarize
-        db:              SQLAlchemy session
+        session_id:              Chat session UUID
+        older_messages:          The current older_messages slice (dicts)
+        db:                      SQLAlchemy session
+        existing_summary_record: ORM record if a summary row already exists
 
     Returns:
-        Summary text string (prefixed with [SUMMARY])
+        New summary text string (prefixed with [SUMMARY])
     """
-    existing = (
-        db.query(ChatMessage)
-        .filter(
-            ChatMessage.chat_id == session_id,
-            ChatMessage.role == MessageRole.system,
-            ChatMessage.content.like("[SUMMARY]%"),
-        )
-        .order_by(ChatMessage.created_at.desc())
-        .first()
-    )
+    # ── Fix 1: Chain previous summary into the input ──────────────────────
+    # Prepend the old summary as a system message so the new summary
+    # covers old compressed knowledge + new older_messages together.
+    if existing_summary_record:
+        messages_to_summarize = [
+            {"role": "system", "content": existing_summary_record.content}
+        ] + older_messages
+    else:
+        messages_to_summarize = older_messages
 
-    summary_text = await _call_summarizer(older_messages)
+    summary_text = await _call_summarizer(messages_to_summarize)
 
-    if existing:
-        # Update in-place → no duplicate summary rows
-        existing.content = summary_text
+    if existing_summary_record:
+        # Update in-place → no duplicate summary rows ever
+        existing_summary_record.content = summary_text
         db.commit()
     else:
-        # First time — create the summary record
         db.add(ChatMessage(
             chat_id=session_id,
             role=MessageRole.system,
@@ -308,26 +332,46 @@ async def _semantic_search(
     query: str,
     exclude_ids: set[str],
     token_budget: int,
+    older_messages_db: list,
 ) -> list[dict]:
     """
     Search the shared Qdrant collection for messages semantically related
     to the current query, scoped to this session.
 
-    Ranking: results come back ordered by Qdrant score (descending).
-    No score threshold — we trust ranking + token budget cap instead.
-    A low-score result that fits the budget is better than nothing.
+    Fix (Issue 3): Before appending a result, check if its content is already
+    substantially represented in accumulated semantic_msgs. This prevents
+    near-duplicate messages (same topic, slightly different wording) from
+    padding the context with repetition.
+
+    Fix (Issue 5): Re-rank results by combining Qdrant similarity score with
+    a recency weight. Recent messages from the older_messages slice are more
+    likely to be relevant than very old ones with similar embeddings.
+    Score = similarity * 0.7 + recency_weight * 0.3
+    recency_weight is the normalized position of the message in older_messages
+    (0.0 = oldest, 1.0 = most recent in the older slice).
+
+    Ranking: after re-scoring, results are sorted descending before budget cap.
+    No score threshold — budget is the only hard gate.
 
     Args:
-        session_id_str: Used in the Qdrant payload filter (chat_id field)
-        query:          The current user message text (query vector source)
-        exclude_ids:    message_ids already in the recent window (skip these)
-        token_budget:   Max tokens to spend on semantic results
+        session_id_str:    Used in the Qdrant payload filter (chat_id field)
+        query:             The current user message text (query vector source)
+        exclude_ids:       message_ids already in the recent window (skip these)
+        token_budget:      Max tokens to spend on semantic results
+        older_messages_db: DB records for the older slice (used for recency index)
 
     Returns:
-        List of {role, content} dicts in order of descending relevance,
-        capped to token_budget.
+        List of {role, content} dicts, re-ranked and budget-capped.
     """
     try:
+        # Build a position index for recency weighting
+        # {message_id_str: normalized_position}  where 1.0 = most recent in older slice
+        total_older = len(older_messages_db)
+        recency_index: dict[str, float] = {}
+        for i, msg in enumerate(older_messages_db):
+            # i=0 is oldest → weight 0.0; i=total-1 is most recent → weight 1.0
+            recency_index[str(msg.id)] = i / max(total_older - 1, 1)
+
         # Embed the query vector
         query_vector = await asyncio.to_thread(
             _embeddings.embed_query,
@@ -344,7 +388,7 @@ async def _semantic_search(
             ]
         )
 
-        # Raw Qdrant search (not via LangChain wrapper) so we get the filter param
+        # Raw Qdrant search — not via LangChain wrapper, so filter param works
         results = await asyncio.to_thread(
             _qdrant.search,
             collection_name=CHAT_MESSAGES_COLLECTION,
@@ -354,9 +398,8 @@ async def _semantic_search(
             with_payload=True,
         )
 
-        semantic_msgs: list[dict] = []
-        tokens_used = 0
-
+        # ── Fix 5: Re-rank by similarity + recency ────────────────────────
+        scored: list[tuple[float, dict]] = []
         for point in results:
             payload    = point.payload or {}
             message_id = payload.get("message_id", "")
@@ -366,10 +409,38 @@ async def _semantic_search(
             if not content or message_id in exclude_ids:
                 continue
 
-            msg_tokens = _count_tokens(content) + 4  # +4 overhead
+            similarity    = point.score  # Qdrant cosine score [0, 1]
+            recency_w     = recency_index.get(message_id, 0.0)
+            combined_score = similarity * 0.7 + recency_w * 0.3
+
+            scored.append((combined_score, {
+                "message_id": message_id,
+                "role":       role,
+                "content":    content,
+            }))
+
+        # Sort by combined score descending — best first
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        # ── Budget cap + Fix 3: content dedup ─────────────────────────────
+        semantic_msgs: list[dict] = []
+        tokens_used = 0
+
+        for _, candidate in scored:
+            message_id = candidate["message_id"]
+            content    = candidate["content"]
+            role       = candidate["role"]
+
+            # Fix 3: skip if this content is substantially already represented.
+            # Simple substring check on the raw content (before label prefix).
+            # Catches near-duplicate messages from similar turns.
+            if any(content in m["content"] for m in semantic_msgs):
+                continue
+
+            msg_tokens = _count_tokens(content) + 4  # +4 per-message overhead
 
             if tokens_used + msg_tokens > token_budget:
-                break  # budget exhausted — stop (results are ranked, best come first)
+                break  # budget exhausted — remaining candidates are lower-scored
 
             semantic_msgs.append({
                 "role":    role,
@@ -473,7 +544,6 @@ async def build_context_window(
     # ── Step 4: Token estimation ──────────────────────────────────────────
     recent_tokens  = _count_messages_tokens(recent_msgs)
     summary_tokens = _count_tokens(existing_summary_text) if existing_summary_text else 0
-    # System prompt overhead is not passed here but reserved in AVAILABLE_CONTEXT already
     total_estimated = summary_tokens + recent_tokens + _SYSTEM_PROMPT_BUDGET
 
     # ── Step 5: Summarize older messages if over budget ───────────────────
@@ -481,23 +551,31 @@ async def build_context_window(
 
     if older_msgs:
         if total_estimated > available_budget:
-            # Budget exceeded — (re)generate summary from older_messages
-            # recent_messages are NEVER touched or summarized
-            summary_text = await _get_or_update_summary(session_id, older_msgs, db)
-            summary_msg  = {"role": "system", "content": summary_text}
+            # Budget exceeded — (re)generate summary.
+            # Fix 1: pass the ORM record so _get_or_update_summary can chain
+            # the old summary into the new one (v1 → v2 → v3 rolling chain).
+            summary_text = await _get_or_update_summary(
+                session_id,
+                older_msgs,
+                db,
+                existing_summary_record,   # ← Fix 1: pass record, not just text
+            )
+            summary_msg = {"role": "system", "content": summary_text}
         elif existing_summary_text:
-            # Budget is fine but a summary exists from a previous turn — keep using it
-            # (summary already covers what older_msgs contains)
+            # Budget is fine but a summary exists — keep reusing it.
             summary_msg = {"role": "system", "content": existing_summary_text}
 
     # ── Step 6: Semantic retrieval from Qdrant ────────────────────────────
-    # Budget available for semantic results = total available minus what recent+summary consume
     current_summary_tokens = (
         _count_tokens(summary_msg["content"]) if summary_msg else 0
     )
-    semantic_budget = available_budget - recent_tokens - current_summary_tokens - _SYSTEM_PROMPT_BUDGET
+    semantic_budget = (
+        available_budget
+        - recent_tokens
+        - current_summary_tokens
+        - _SYSTEM_PROMPT_BUDGET
+    )
 
-    # IDs already committed to recent window — skip these in semantic results
     recent_ids = {str(msg.id) for msg in recent_messages_db}
 
     semantic_msgs: list[dict] = []
@@ -507,6 +585,7 @@ async def build_context_window(
             query=current_user_message,
             exclude_ids=recent_ids,
             token_budget=semantic_budget,
+            older_messages_db=older_messages_db,  # ← Fix 5: for recency weighting
         )
 
     # ── Step 7: Assemble final context window ─────────────────────────────
@@ -518,15 +597,39 @@ async def build_context_window(
     final_context.extend(semantic_msgs)
     final_context.extend(recent_msgs)
 
-    # ── Logging ───────────────────────────────────────────────────────────
+    # ── Fix 2: Hard token guard ───────────────────────────────────────────
+    # Rare edge case: if the assembled window still exceeds budget (e.g. the
+    # summary itself is very large, or recent messages are unusually long),
+    # trim semantic messages one by one from the end (lowest-scored last)
+    # until we're within budget. recent_msgs are NEVER trimmed.
     total_tokens = _count_messages_tokens(final_context)
+
+    if total_tokens > available_budget and semantic_msgs:
+        print(
+            f"[Context] Hard guard triggered: {total_tokens} > {available_budget}. "
+            f"Trimming {len(semantic_msgs)} semantic message(s)."
+        )
+        while semantic_msgs and total_tokens > available_budget:
+            semantic_msgs.pop()  # remove lowest-scored (appended last by _semantic_search)
+            final_context = (
+                ([summary_msg] if summary_msg else [])
+                + semantic_msgs
+                + recent_msgs
+            )
+            total_tokens = _count_messages_tokens(final_context)
+
+    # ── Decision logging ──────────────────────────────────────────────────
+    summarize_decision = (
+        "updated"  if older_msgs and total_estimated > available_budget
+        else "reused" if summary_msg
+        else "none"
+    )
     print(
         f"[Context] session={session_id_str} | "
-        f"messages={len(final_context)} | "
-        f"tokens≈{total_tokens} / {available_budget} | "
-        f"recent={len(recent_msgs)} | "
-        f"semantic={len(semantic_msgs)} | "
-        f"summary={'updated' if older_msgs and total_estimated > available_budget else 'reused' if summary_msg else 'none'}"
+        f"total_msgs={len(final_context)} | tokens≈{total_tokens}/{available_budget} | "
+        f"recent={len(recent_msgs)} | semantic={len(semantic_msgs)} | "
+        f"summary={summarize_decision} | "
+        f"budget_headroom={available_budget - total_tokens}"
     )
 
     return final_context

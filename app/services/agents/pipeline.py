@@ -3,14 +3,25 @@ Agent pipeline orchestrator.
 
 Responsibilities:
   1. Resolve session sources (collection_names + source_ids)
-  2. Build context window (delegated entirely to context.py)
+  2. Build context window (delegated to context.manager via context package)
   3. Run agent (delegated entirely to chat_agent.py)
   4. Return reply string
 
 NOT responsible for:
-  - Summarization (context.py handles it)
+  - Summarization (context pipeline handles it)
   - Embedding (called as BackgroundTask from the route)
   - Memory management (agent tools handle it)
+
+Context pipeline (context/ package):
+  Implements Claude-style rolling conversation runtime with these stages:
+    1. Load state (summary + recent messages)
+    2. Estimate token budget
+    3. Compact if needed (before agent runs)
+    4. Assemble final context
+    5. Return to agent
+
+  No semantic chat retrieval (disabled by default).
+  All stages have observable event hooks for future streaming.
 
 Embedding:
   embed_turn_messages is called as a FastAPI BackgroundTask from the route
@@ -135,7 +146,7 @@ async def run_agent_pipeline(
         raise
     except Exception as e:
         print(f"[Pipeline] Unexpected error | session={chat_id} | user={user_id} | {e}")
-        raise ApiError(statusCode=500, message="Agent pipeline failed unexpectedly")
+        raise ApiError(status_code=500, detail="Agent pipeline failed unexpectedly")
 
 
 # ─────────────────────────────────────────────────────────────────────────

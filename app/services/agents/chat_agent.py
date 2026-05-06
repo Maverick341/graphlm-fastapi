@@ -1,6 +1,4 @@
 """
-app/services/agents/chat_agent.py
-
 RAG Agent runner using the OpenAI Agents SDK.
 
 Single responsibility: receive a pre-built context window and run the agent.

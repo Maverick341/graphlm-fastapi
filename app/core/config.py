@@ -72,6 +72,7 @@ class Settings(BaseSettings):
     CONTEXT_KEEP_RECENT: int = 6            # always include last N messages verbatim
     SEMANTIC_TOP_K: int = 15               # Qdrant candidates for semantic retrieval
     MIN_EMBED_CHARS: int = 20              # skip embedding messages shorter than this
+    SYSTEM_PROMPT_BUDGET: int = 1_000      # token headroom for agent system prompt + tool descriptions
 
     MEM0_API_KEY: str = ""
 
