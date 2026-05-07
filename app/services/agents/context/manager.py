@@ -67,14 +67,14 @@ async def build_context_window(
     # ──────────────────────────────────────────────────────────────────
     # Stage 1: Load state
     # ──────────────────────────────────────────────────────────────────
-    # await emit_pipeline_event(PipelineEventType.LOADING_STATE, session_id_str)
+    await emit_pipeline_event(PipelineEventType.LOADING_STATE, session_id_str)
     
     state = await ConversationState.load_from_db(session_id, db)
     
     # ──────────────────────────────────────────────────────────────────
     # Stage 2: Estimate budget
     # ──────────────────────────────────────────────────────────────────
-    # await emit_pipeline_event(PipelineEventType.ESTIMATING_BUDGET, session_id_str)
+    await emit_pipeline_event(PipelineEventType.ESTIMATING_BUDGET, session_id_str)
     
     token_estimate = estimate_tokens(
         state.rolling_summary,
@@ -87,11 +87,11 @@ async def build_context_window(
     # Stage 3: Compact if over budget (BEFORE agent runs)
     # ──────────────────────────────────────────────────────────────────
     if should_compact(token_estimate) and state.older_messages_ids:
-        # await emit_pipeline_event(
-        #     PipelineEventType.COMPACTING_CONTEXT,
-        #     session_id_str,
-        #     {"messages_eligible": len(state.older_messages_ids)}
-        # )
+        await emit_pipeline_event(
+            PipelineEventType.COMPACTING_CONTEXT,
+            session_id_str,
+            {"messages_eligible": len(state.older_messages_ids)}
+        )
         
         # Load the full older messages for compaction
         older_messages = await load_older_messages_for_compaction(
@@ -153,7 +153,7 @@ async def build_context_window(
     # ──────────────────────────────────────────────────────────────────
     # Stage 5: Assemble final context
     # ──────────────────────────────────────────────────────────────────
-    # await emit_pipeline_event(PipelineEventType.ASSEMBLING_CONTEXT, session_id_str)
+    await emit_pipeline_event(PipelineEventType.ASSEMBLING_CONTEXT, session_id_str)
     
     final_context = assemble_context_window(
         summary=state.rolling_summary,

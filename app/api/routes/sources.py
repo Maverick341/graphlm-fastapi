@@ -71,9 +71,9 @@ router = APIRouter(prefix="/sources", tags=["sources"])
 @limiter.limit("5/minute")
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     title: str = Form(..., min_length=1, max_length=200, description="Display title for document"),
     file: UploadFile = File(..., description="Document file to upload (PDF, DOCX, TXT, MD)"),
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -220,7 +220,7 @@ async def upload_document(
 async def add_github(
     request: Request,
     body: AddGithubRequest,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):

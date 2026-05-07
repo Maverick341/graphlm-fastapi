@@ -38,7 +38,7 @@ from app.models.source_index import SourceIndex
 from app.utils.api_error import ApiError
 
 from app.services.agents.context import build_context_window, embed_message
-from app.services.agents.chat_agent import run_agent
+from app.services.agents.chat_agent import run_agent, run_agent_stream
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -84,7 +84,7 @@ def _resolve_sources(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Main Pipeline
+# Main Pipeline (Non-streaming)
 # ─────────────────────────────────────────────────────────────────────────
 
 async def run_agent_pipeline(
@@ -150,7 +150,74 @@ async def run_agent_pipeline(
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Background Task: Embed turn messages into Qdrant
+# Main Pipeline (Streaming)
+# ─────────────────────────────────────────────────────────────────────────
+
+async def run_agent_pipeline_stream(
+    user_id: str,
+    session: ChatSession,
+    chat_id: UUID,
+    user_message: str,
+):
+    """
+    Streaming pipeline: user message → agent reply (token-by-token).
+
+    Identical to run_agent_pipeline but yields text chunks instead of returning full reply.
+
+    Steps:
+      1. Open a short-lived DB session to resolve sources + build context window
+      2. Close DB session before running the agent (agent may take seconds)
+      3. Run agent with streaming, yield text chunks
+      4. Return full reply via async generator
+
+    DB session is closed before agent streaming starts — no long-held connections
+    during LLM inference time.
+
+    Args:
+        user_id:      User UUID string (scopes Mem0 memory)
+        session:      ChatSession ORM object (with .sources pre-loaded)
+        chat_id:      UUID of the chat session
+        user_message: The current user message text
+
+    Yields:
+        Text chunks from agent response (strings)
+
+    Raises:
+        ApiError(500): On unrecoverable failure
+    """
+    try:
+        with get_db_session() as db:
+            # Step 1: Resolve which sources are ready for retrieval
+            collection_names, source_ids = _resolve_sources(session, db)
+
+            # Step 2: Build context window
+            # context.py handles: DB fetch, split, summarize, semantic search
+            context_window = await build_context_window(
+                session_id=chat_id,
+                current_user_message=user_message,
+                db=db,
+            )
+        # DB session closed here — agent stream runs outside the connection
+
+        # Step 3: Stream agent with pre-built context
+        async for chunk in run_agent_stream(
+            user_id=user_id,
+            messages=context_window,
+            collection_names=collection_names,
+            source_ids=source_ids,
+            chat_id=str(chat_id),
+        ):
+            yield chunk
+
+    except ApiError:
+        raise
+    except Exception as e:
+        print(f"[Pipeline] Streaming error | session={chat_id} | user={user_id} | {e}")
+        raise ApiError(500, "Agent streaming pipeline failed unexpectedly")
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Background Task: Embed turn messages into Qdrant (used only if agent response is non-streaming)
 # ─────────────────────────────────────────────────────────────────────────
 
 async def embed_turn_messages(

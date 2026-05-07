@@ -6,7 +6,8 @@ All endpoints require authentication (current_user).
 All endpoints return responses wrapped in ApiResponse.
 """
 
-from fastapi import APIRouter, Depends, Query, Request, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, Query, Request, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from uuid import UUID
@@ -36,7 +37,12 @@ from app.utils.api_error import ApiError
 from app.utils.db_queries import verify_ownership
 from app.repositories import session_repo, source_repo
 from app.api.limiter import limiter
-from app.services.agents.pipeline import run_agent_pipeline, embed_turn_messages
+from app.utils.session_utils import (
+    get_session_with_auth,
+    build_session_response,
+    build_session_list_response,
+)
+from app.services.agents.streaming.response_handler import stream_agent_response
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -108,18 +114,9 @@ async def list_sessions(
     
     Returns:
         ApiResponse with list of SessionResponse objects
-    
-    Status: 200 OK
     """
     sessions, _ = session_repo.get_sessions_by_user(db, current_user.id)
-    
-    # Build response with message counts
-    sessions_data = []
-    for session in sessions:
-        message_count = session_repo.get_message_count(db, session.id)
-        response = SessionResponse.model_validate(session)
-        response.message_count = message_count
-        sessions_data.append(response)
+    sessions_data = build_session_list_response(db, sessions)
     
     return ApiResponse(
         statusCode=200,
@@ -141,30 +138,9 @@ async def get_session(
     Get details of a specific chat session.
     
     Includes session metadata and attached sources.
-    
-    Args:
-        session_id: Session ID (UUID)
-        db: Database session
-        current_user: Authenticated user
-    
-    Returns:
-        ApiResponse with SessionResponse
-    
-    Raises:
-        ApiError(404): If session not found
-        ApiError(403): If session doesn't belong to user
     """
-    session = session_repo.get_session_by_id(db, session_id)
-    if not session:
-        raise ApiError(404, "Session not found")
-    
-    verify_ownership(session.user_id, current_user.id, "session")
-    
-    # Build response with message count
-    response_data = SessionResponse.model_validate(session)
-    response_data.message_count = session_repo.get_message_count(db, session.id)
-    response_data.source_count = len(session.sources)
-    response_data.source_ids = [s.id for s in session.sources]
+    session = await get_session_with_auth(db, session_id, current_user)
+    response_data = build_session_response(db, session)
     
     return ApiResponse(
         statusCode=200,
@@ -187,37 +163,15 @@ async def rename_session(
     Rename a chat session's title.
     
     Can be called anytime, regardless of message count.
-    
-    Args:
-        session_id: Session ID
-        body: RenameTitleRequest with new title
-        db: Database session
-        current_user: Authenticated user
-    
-    Returns:
-        ApiResponse with updated SessionResponse
-    
-    Raises:
-        ApiError(404): If session not found
-        ApiError(403): If session doesn't belong to user
-        ApiError(400): If title validation fails
     """
-    session = session_repo.get_session_by_id(db, session_id)
-    if not session:
-        raise ApiError(404, "Session not found")
+    session = await get_session_with_auth(db, session_id, current_user)
     
-    verify_ownership(session.user_id, current_user.id, "session")
-    
-    # Update title
     title = body.title.strip()
     if not title:
         raise ApiError(400, "Title cannot be empty")
     
     session = session_repo.update_session_title(db, session_id, title)
-    
-    # Build response
-    response_data = SessionResponse.model_validate(session)
-    response_data.message_count = session_repo.get_message_count(db, session.id)
+    response_data = build_session_response(db, session)
     
     return ApiResponse(
         statusCode=200,
@@ -239,28 +193,10 @@ async def attach_sources(
     """
     Attach sources to a chat session.
     
-    IMPORTANT: Sources can only be attached if session has zero messages.
+    Sources can only be attached if session has zero messages.
     This ensures the RAG context is immutable once chat begins.
-    
-    Args:
-        session_id: Session ID
-        body: AttachSourcesRequest with list of source IDs
-        db: Database session
-        current_user: Authenticated user
-    
-    Returns:
-        ApiResponse with updated SessionResponse
-    
-    Raises:
-        ApiError(404): If session not found
-        ApiError(403): If session doesn't belong to user or sources don't belong to user
-        ApiError(400): If session has messages or sources don't exist
     """
-    session = session_repo.get_session_by_id(db, session_id)
-    if not session:
-        raise ApiError(404, "Session not found")
-    
-    verify_ownership(session.user_id, current_user.id, "session")
+    session = await get_session_with_auth(db, session_id, current_user)
     
     # Validate: session must have zero messages
     message_count = session_repo.get_message_count(db, session.id)
@@ -283,23 +219,15 @@ async def attach_sources(
             "One or more sources not found or do not belong to you"
         )
     
+    # Attach sources (avoid duplicates)
     existing_ids = {s.id for s in session.sources}
-    
-    # Many-to-many attach (append, avoid duplicates)
-
-    # session.sources.clear()  # <-- Do not clear, just append new sources
     for source in sources:
         if source.id not in existing_ids:
             session.sources.append(source)
 
     db.commit()
     db.refresh(session)
-    
-    # Build response
-    response_data = SessionResponse.model_validate(session)
-    response_data.message_count = session_repo.get_message_count(db, session.id)
-    response_data.source_count = len(session.sources)
-    response_data.source_ids = [s.id for s in session.sources]
+    response_data = build_session_response(db, session)
     
     return ApiResponse(
         statusCode=200,
@@ -322,26 +250,8 @@ async def detach_source_from_session(
 ):
     """
     Detach a source from a chat session.
-
-    Args:
-        session_id: Session ID
-        source_id: Source ID to detach
-        db: Database session
-        current_user: Authenticated user
-
-    Returns:
-        ApiResponse with updated SessionResponse
-
-    Raises:
-        ApiError(404): If session or source not found
-        ApiError(403): If session or source doesn't belong to user
-        ApiError(400): If source not attached to session
     """
-    session = session_repo.get_session_by_id(db, session_id)
-    if not session:
-        raise ApiError(404, "Session not found")
-
-    verify_ownership(session.user_id, current_user.id, "session")
+    session = await get_session_with_auth(db, session_id, current_user)
 
     source = source_repo.get_source_by_id(db, source_id)
     if not source:
@@ -349,7 +259,7 @@ async def detach_source_from_session(
 
     verify_ownership(source.user_id, current_user.id, "source")
 
-    # Prevent modification after chat starts (same rule as attach)
+    # Prevent modification after chat starts
     message_count = session_repo.get_message_count(db, session.id)
     if message_count > 0:
         raise ApiError(
@@ -357,14 +267,8 @@ async def detach_source_from_session(
             "Cannot detach sources from a session with existing messages."
         )
 
-
-    # Ensure source is attached to session
-    attached = None
-    for s in session.sources:
-        if s.id == source.id:
-            attached = s
-            break
-
+    # Find source in session
+    attached = next((s for s in session.sources if s.id == source.id), None)
     if not attached:
         raise ApiError(400, "Source not attached to this session")
 
@@ -372,15 +276,11 @@ async def detach_source_from_session(
         raise ApiError(400, "Session must have at least one source")
 
     session.sources.remove(attached)
-
     db.commit()
     db.refresh(session)
 
-    response_data = SessionResponse.model_validate(session)
-    response_data.message_count = session_repo.get_message_count(db, session.id)
-    response_data.source_count = len(session.sources)
-    response_data.source_ids = [s.id for s in session.sources]
-
+    response_data = build_session_response(db, session)
+    
     return ApiResponse(
         statusCode=200,
         success=True,
@@ -401,27 +301,8 @@ async def delete_session(
     Delete a chat session and all related messages.
     
     Cascade delete removes all ChatMessage records for this session.
-    Attempt to clean up associated memories (non-fatal if fails).
-    
-    Args:
-        session_id: Session ID
-        db: Database session
-        current_user: Authenticated user
-    
-    Returns:
-        ApiResponse with success message
-    
-    Raises:
-        ApiError(404): If session not found
-        ApiError(403): If session doesn't belong to user
     """
-    session = session_repo.get_session_by_id(db, session_id)
-    if not session:
-        raise ApiError(404, "Session not found")
-    
-    verify_ownership(session.user_id, current_user.id, "session")
-    
-    # Delete session via repository (cascade deletes messages via SQLAlchemy relationship)
+    session = await get_session_with_auth(db, session_id, current_user)
     session_repo.delete_session(db, session_id)
     
     return ApiResponse(
@@ -436,87 +317,79 @@ async def delete_session(
 # Message Endpoints
 # ─────────────────────────────────────────────────────────────────────────
 
-@router.post("/{session_id}/messages", response_model=ApiResponse, status_code=201)
+@router.post("/{session_id}/messages", status_code=200)
 @limiter.limit("5/minute")
 async def send_message(
     request: Request,
     session_id: UUID,
     body: SendMessageRequest,
-    background_tasks: BackgroundTasks = BackgroundTasks(),
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Send a message in a chat session.
-    
-    Triggers RAG pipeline:
-    1. Persist user message immediately
-    2. Run vector + graph retrieval from attached sources
-    3. Run LLM agent with retrieved context
-    4. Stream response (or return completion)
-    5. Persist assistant message
-    
-    NOTE: Full streaming/RAG implementation is TBD.
-    Current implementation creates placeholder messages for validation.
-    
+    Send a message in a chat session with Server-Sent Events streaming.
+
+    Streams the full RAG pipeline:
+      1. Validates session and user ownership
+      2. Persists user message to database
+      3. Streams agent response (token-by-token)
+      4. Streams tool invocations and results
+      5. Persists assistant message
+      6. Embeds both messages (non-blocking)
+
+    Returns Server-Sent Events in format:
+      - [PIPELINE] events during context building
+      - [TOOL] events when tools are called/completed
+      - Text chunks of agent response
+      - [DONE] marker on completion
+      - [ERROR] on failure
+
     Args:
-        session_id: Session ID
-        body: SendMessageRequest with message content
+        session_id: Chat session UUID
+        body: Message content to send
         db: Database session
         current_user: Authenticated user
-    
+
     Returns:
-        ApiResponse with created MessageResponse (user message only)
-        Note: Assistant message will be added by RAG pipeline
-    
+        StreamingResponse with text/event-stream media type
+
     Raises:
-        ApiError(404): If session not found
-        ApiError(403): If session doesn't belong to user
-        ApiError(400): If message content validation fails
+        404: Session not found
+        403: Session doesn't belong to user
+        400: Empty message content
     """
+    # Validate session and ownership
     session = session_repo.get_session_by_id(db, session_id)
     if not session:
         raise ApiError(404, "Session not found")
-    
+
     verify_ownership(session.user_id, current_user.id, "session")
-    
+
     # Validate content
     content = body.content.strip()
     if not content:
         raise ApiError(400, "Message content cannot be empty")
-    
-    # Create user message via repository
+
+    # Create user message immediately (persisted to DB)
     user_message = session_repo.add_user_message(db, session.id, content)
-    
-    # Run RAG pipeline asynchronously
-    agent_response = await run_agent_pipeline(
-        user_id=str(current_user.id), 
-        session=session, 
-        chat_id=session.id or session_id, 
-        user_message=content,
-    )
 
-    # Create assistant message with response via repository
-    assistant_message = session_repo.add_assistant_message(db, session.id, agent_response)
-
-    background_tasks.add_task(
-        embed_turn_messages,
-        session_id=str(session.id),
-        user_message_id=str(user_message.id),
-        user_content=content,
-        assistant_message_id=str(assistant_message.id),
-        assistant_content=agent_response,
-    )
-
-    
-    # Build response
-    response_data = MessageResponse.model_validate(assistant_message)
-    
-    return ApiResponse(
-        statusCode=201,
-        success=True,
-        message="Message sent successfully. RAG pipeline processing...",
-        data=response_data,
+    # Return streaming response with SSE event stream
+    return StreamingResponse(
+        stream_agent_response(
+            session_id=session_id,
+            user_id=current_user.id,
+            session=session,
+            user_message_id=user_message.id,
+            user_content=content,
+            background_tasks=background_tasks,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering
+        },
     )
 
 

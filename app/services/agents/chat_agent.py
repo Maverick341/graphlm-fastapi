@@ -22,7 +22,13 @@ Memory model:
   This ensures no duplicate writes and no memory bloat.
 """
 
-from agents import Agent, Runner
+from agents import Agent, ItemHelpers, Runner
+from openai.types.responses import ResponseTextDeltaEvent
+from agents import (
+    ToolCallItem,
+    ToolCallOutputItem,
+    MessageOutputItem,
+)
 
 from app.core.config import settings
 from app.services.agents.tools import (
@@ -122,7 +128,7 @@ delete_memory
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Agent Runner
+# Agent Runner (Non-streaming)
 # ─────────────────────────────────────────────────────────────────────────
 
 async def run_agent(
@@ -178,3 +184,140 @@ async def run_agent(
     )
 
     return result.final_output
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Streaming Agent Runner
+# ─────────────────────────────────────────────────────────────────────────
+
+async def run_agent_stream(
+    user_id: str,
+    messages: list[dict],
+    collection_names: list[str],
+    source_ids: list[str],
+    chat_id: str,
+):
+    """
+    Stream version of run_agent — yields typed events with metadata.
+
+    Uses Agent SDK's streaming mode to yield different event types:
+      - Message content (token-by-token text deltas)
+      - Tool call events (when agent invokes a tool)
+      - Tool output events (when tool returns)
+      - Typing indicator events (metadata about agent activity)
+
+    Event classification (from run_item_stream_event):
+      - tool_call_item: Agent is calling a tool
+        * Yields: ("tool_call", {"tool_name": str, "arguments": dict})
+      - tool_call_output_item: Tool returned results
+        * Yields: ("tool_output", {"tool_name": str, "output": str})
+      - message_output_item: LLM output completed
+        * Already in raw_response_event deltas, skip here
+
+    Event classification (from raw_response_event):
+      - ResponseTextDeltaEvent: Token-by-token text
+        * Yields: ("text", chunk_string)
+
+    Structured format allows frontend to:
+      - Show "Searching documents..." when vector_search tool is called
+      - Show "Querying graph..." when graph_search tool is called
+      - Show typing indicator during tool execution
+      - Append text chunks in real-time
+
+    Args:
+        user_id:          User UUID string — scopes Mem0 search/write in tools
+        messages:         Pre-built context window from context.build_context_window()
+                          [{role, content}, ...] in chronological order
+        collection_names: Qdrant collections available for vector_search
+        source_ids:       Neo4j source_ids available for graph_search
+        chat_id:          Chat session UUID string (passed to context for tool logging)
+
+    Yields:
+        Tuples of (event_type: str, event_data: dict):
+          - ("text", chunk_string): Message text chunk
+          - ("tool_call", {"tool_name": str, "arguments": dict}): Tool invoked
+          - ("tool_output", {"tool_name": str, "output": str}): Tool completed
+          - ("typing", {"tool": str}): Agent is thinking/executing tool
+    """
+    ctx = AgentPromptContext(
+        collection_names=collection_names,
+        source_ids=source_ids,
+        user_id=user_id,
+        chat_id=chat_id,
+    )
+
+    agent = Agent[AgentPromptContext](
+        name="GraphLM RAG Agent",
+        model=settings.OPENAI_LLM_MODEL,
+        instructions=_build_system_prompt(ctx),
+        tools=[
+            vector_search,
+            graph_search,
+            search_memory,
+            save_memory,
+            update_memory,
+            delete_memory,
+        ],
+    )
+
+    # Use run_streamed instead of run
+    result = Runner.run_streamed(
+        agent,
+        messages,
+        context=ctx,
+    )
+
+    # Track call_id → tool_name mapping for ToolCallOutputItem lookups
+    active_calls: dict[str, str] = {}
+
+    # Iterate through stream events and yield typed events
+    async for event in result.stream_events():
+        # Token-by-token text streaming (raw LLM output)
+        if event.type == "raw_response_event":
+            if isinstance(event.data, ResponseTextDeltaEvent):
+                # Yield text chunk with event type marker
+                yield ("text", event.data.delta)
+
+        # Higher-level item events (tool calls, outputs, messages)
+        elif event.type == "run_item_stream_event":
+            if isinstance(event.item, ToolCallItem):
+                # Tool was called — emit event so frontend knows what's happening
+                # Store call_id → tool_name for later output lookup
+                active_calls[event.item.call_id] = event.item.tool_name
+                yield (
+                    "tool_call",
+                    {
+                        "tool_name": event.item.tool_name,
+                    },
+                )
+                print(f"[Agent] Tool called: {event.item.tool_name}")
+
+            elif isinstance(event.item, ToolCallOutputItem):
+                # Tool returned output — emit so frontend can log/display
+                # Look up tool_name from the call_id mapping
+                tool_name = active_calls.pop(event.item.call_id, "unknown_tool")
+                tool_output = (
+                    event.item.output
+                    if isinstance(event.item.output, str)
+                    else str(event.item.output)
+                )
+                yield (
+                    "tool_output",
+                    {
+                        "tool_name": tool_name,
+                        "output": tool_output[:500],  # Truncate long outputs
+                    },
+                )
+                print(f"[Agent] Tool output: {tool_name}")
+
+            elif isinstance(event.item, MessageOutputItem):
+                # Message output — skip (already in raw_response_event deltas)
+                pass
+            else:
+                # Ignore other item types
+                pass
+
+        # Agent state updates
+        elif event.type == "agent_updated_stream_event":
+            # Agent state changed — ignore for now
+            pass

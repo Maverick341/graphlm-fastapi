@@ -2,14 +2,29 @@
 Pipeline event types and emitter for observable conversation runtime.
 
 These events mark the stages of context building and agent execution.
-Currently placeholders for future streaming integration (SSE/WebSocket).
+Events can be emitted to a request-scoped async queue for SSE streaming.
 
-For now, events can be uncommented in manager.py for debug logging.
-Later, emit_pipeline_event() will broadcast to connected clients.
+Context variable approach:
+  - Request handler sets event queue in context
+  - Pipeline stages emit events to the queue
+  - SSE generator yields events from the queue
+  - Clean separation of concerns with contextvars
+
+For development/testing without streaming:
+  - Events are logged to console if queue is not set
 """
 
+import asyncio
 from enum import Enum
 from typing import Optional
+from contextvars import ContextVar
+import json
+
+# Request-scoped event queue (set by streaming endpoint)
+_event_queue: ContextVar[Optional[asyncio.Queue]] = ContextVar(
+    "_event_queue",
+    default=None,
+)
 
 
 class PipelineEventType(str, Enum):
@@ -34,6 +49,18 @@ class PipelineEventType(str, Enum):
     STREAMING_RESPONSE = "streaming_response"
 
 
+async def set_event_queue(queue: asyncio.Queue) -> None:
+    """
+    Set the event queue for the current async context.
+    
+    Called by the streaming endpoint before starting the pipeline.
+    
+    Args:
+        queue: asyncio.Queue to put events into
+    """
+    _event_queue.set(queue)
+
+
 async def emit_pipeline_event(
     event_type: PipelineEventType,
     session_id: str,
@@ -41,29 +68,49 @@ async def emit_pipeline_event(
 ) -> None:
     """
     Emit a pipeline event for observability and streaming.
-    
-    PLACEHOLDER: Currently does nothing.
-    
-    Future integration points:
-      - FastAPI background task to SSE endpoint
-      - WebSocket broadcast to connected clients
-      - Redis pub/sub for distributed systems
-      - Metrics collection (Prometheus, DataDog)
-    
+
+    If an event queue is set in context (streaming mode):
+      - Puts SSE-formatted event in the queue
+      - Returns immediately (non-blocking)
+
+    If no queue is set (development mode):
+      - Logs event to console for debugging
+
     Args:
         event_type: The PipelineEventType that occurred
         session_id: Chat session UUID (for client routing)
         payload: Optional dict with event-specific data
                  e.g., {"tokens_used": 1234, "summary_updated": True}
-    
+
     Example:
-        # In manager.py, uncomment to enable:
-        # await emit_pipeline_event(
-        #     PipelineEventType.COMPACTING_CONTEXT,
-        #     session_id_str,
-        #     {"messages_compacted": 5, "new_tokens": 234}
-        # )
+        # In context/manager.py:
+        await emit_pipeline_event(
+            PipelineEventType.COMPACTING_CONTEXT,
+            session_id_str,
+            {"messages_compacted": 5, "new_tokens": 234}
+        )
+
+        # This will either:
+        # (a) Put event in queue if streaming enabled
+        # (b) Print to console if not streaming
     """
-    # TODO: Implement streaming transport
-    # print(f"[PipelineEvent] {event_type.value} | session={session_id} | {payload or {}}")
-    pass
+    queue = _event_queue.get()
+
+    # Build event data
+    event_data = {
+        "type": event_type.value,
+        "session_id": session_id,
+        "payload": payload or {},
+    }
+
+    if queue:
+        # Streaming mode: put event in queue as (event_type, event_data) tuple
+        # Matches format from run_agent_stream() for consistent unpacking
+        await queue.put(("pipeline", event_data))
+    else:
+        # Debug mode: just log
+        print(
+            f"[PipelineEvent] {event_type.value} | "
+            f"session={session_id} | "
+            f"{payload or {}}"
+        )
