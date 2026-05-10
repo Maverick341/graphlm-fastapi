@@ -8,6 +8,9 @@ import json
 from typing import AsyncGenerator, Any
 from app.utils.logger import logger
 
+# Tool name that signals a graph visualization update
+_SUBGRAPH_TOOL_NAME = "subgraph_query"
+
 
 async def process_queue_events(
     event_queue: asyncio.Queue,
@@ -69,22 +72,27 @@ def format_event_as_sse(event_type: str, event_data: Any) -> str:
     if event_type == "text":
         # Message text chunk (raw)
         return f"data: {event_data}\n\n"
-    
+
+    elif event_type == "graph_update":
+        # Structured subgraph from subgraph_query tool — named SSE event
+        graph_json = json.dumps(event_data)
+        return f"event: graph_update\ndata: {graph_json}\n\n"
+
     elif event_type == "tool_call":
         # Tool invocation: {"tool_name": str, ...}
         tool_json = json.dumps(event_data)
         return f"data: [TOOL] call {tool_json}\n\n"
-    
+
     elif event_type == "tool_output":
         # Tool result: {"tool_name": str, "output": str}
         tool_json = json.dumps(event_data)
         return f"data: [TOOL] output {tool_json}\n\n"
-    
+
     elif event_type == "pipeline":
         # Context stage: {"type": str, "session_id": str, "payload": dict}
         pipeline_json = json.dumps(event_data)
         return f"data: [PIPELINE] {pipeline_json}\n\n"
-    
+
     return ""  # Unknown event type
 
 
@@ -136,7 +144,26 @@ async def collect_agent_chunks(
             elif event_type == "tool_call":
                 await event_queue.put(("tool_call", event_data))
             elif event_type == "tool_output":
-                await event_queue.put(("tool_output", event_data))
+                tool_name = event_data.get("tool_name", "")
+
+                if tool_name == _SUBGRAPH_TOOL_NAME:
+                    # Parse subgraph_query output and emit as graph_update event
+                    raw_output = event_data.get("output", "{}")
+                    try:
+                        graph_data = json.loads(raw_output)
+                        if "error" not in graph_data:
+                            await event_queue.put(("graph_update", graph_data))
+                            logger.info("[GraphUpdate] Emitted graph_update event")
+                        else:
+                            logger.warning(
+                                f"[GraphUpdate] subgraph_query returned error: {graph_data['error']}"
+                            )
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            f"[GraphUpdate] Could not parse subgraph_query output as JSON"
+                        )
+                else:
+                    await event_queue.put(("tool_output", event_data))
     
     finally:
         # Signal completion

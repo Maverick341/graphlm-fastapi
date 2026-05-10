@@ -38,6 +38,7 @@ class AgentPromptContext:
     source_ids: list[str]         # Neo4j source_ids (graph RAG)
     user_id: str                  # Mem0 user scope
     chat_id: str                  # For logging / future session-scoped memory
+    subgraph_mode: bool = False   # Whether graph panel is in subgraph mode
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -318,3 +319,52 @@ async def delete_memory(
 
     except Exception as e:
         return f"Failed to delete memory {memory_id}: {str(e)}"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Graph Tool — Subgraph Query (for graph panel visualization)
+# ─────────────────────────────────────────────────────────────────────────
+
+@function_tool
+async def subgraph_query(
+    wrapper: RunContextWrapper[AgentPromptContext],
+    query: str,
+) -> str:
+    """
+    Generate a visual subgraph for the knowledge graph panel based on the user's message.
+
+    ALWAYS call this when the system prompt says GRAPH PANEL MODE is active.
+    Extract the key topics, entities, or concepts from the user's message and pass
+    them as the query — even for simple content questions.
+
+    The graph panel expects an update on EVERY user message turn.
+    This tool runs IN PARALLEL alongside vector_search or graph_search.
+
+    Args:
+        query: Key entities or topics extracted from the user's message.
+               Summarize what they are asking ABOUT, not the full question.
+               Examples:
+                 "Tell me about roles in the PDF" → "job roles responsibilities"
+                 "What is JWT?" → "JWT authentication token"
+                 "How does login work?" → "login authentication flow"
+    """
+    from app.services.agents.graph_query_agent import run_graph_query
+
+    source_ids = wrapper.context.source_ids
+
+    if not source_ids:
+        return '{"error": "No graph-indexed sources attached to this session."}'
+
+    try:
+        result = await run_graph_query(
+            query=query,
+            source_ids=source_ids,
+            max_nodes=200,
+        )
+
+        # Return JSON string so the streaming handler can detect and re-emit
+        # as a graph_update SSE event. The "__graph_update__" key is the signal.
+        return result.model_dump_json()
+
+    except Exception as e:
+        return f'{{"error": "Graph query failed: {str(e)}"}}'

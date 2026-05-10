@@ -56,6 +56,7 @@ async def stream_agent_response(
     user_message_id: UUID,
     user_content: str,
     background_tasks: BackgroundTasks,
+    subgraph_mode: bool = False,
 ):
     """
     Generate SSE stream of pipeline events, tool events, and message content.
@@ -98,6 +99,7 @@ async def stream_agent_response(
             session=session,
             chat_id=session_id,
             user_message=user_content,
+            subgraph_mode=subgraph_mode,
         )
 
         # Collect agent chunks in background and forward to queue

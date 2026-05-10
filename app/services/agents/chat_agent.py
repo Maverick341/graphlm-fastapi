@@ -40,7 +40,11 @@ from app.services.agents.tools import (
     save_memory,
     update_memory,
     delete_memory,
+    subgraph_query,
 )
+
+# Keep in sync with event_handler._SUBGRAPH_TOOL_NAME
+_SUBGRAPH_TOOL = "subgraph_query"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -125,6 +129,21 @@ delete_memory
         else:
             prompt += "Graph search: no graph-indexed sources available yet.\n"
 
+    # ── Subgraph mode directive ────────────────────────────────────────────────────
+    if context.subgraph_mode and has_graph:
+        prompt += (
+            "\n━━━ GRAPH PANEL MODE (ACTIVE) ━━━\n"
+            "The user has explicitly enabled the graph panel in subgraph mode.\n"
+            "You MUST call subgraph_query on EVERY message — no exceptions.\n"
+            "  → Extract the key entities, topics, or concepts from the user's message.\n"
+            "  → Call subgraph_query with those as the query string.\n"
+            "  → Call it IN PARALLEL with vector_search or graph_search — do not wait.\n"
+            "Even for simple content questions, extract what they are asking ABOUT\n"
+            "and pass that as the subgraph_query input.\n"
+            "Example: 'Tell me about roles in the PDF' → subgraph_query('job roles responsibilities')\n"
+            "Example: 'What is JWT?' → subgraph_query('JWT authentication token')\n"
+        )
+
     return prompt
 
 
@@ -138,6 +157,7 @@ async def run_agent(
     collection_names: list[str],
     source_ids: list[str],
     chat_id: str,
+    subgraph_mode: bool = False,
 ) -> str:
     """
     Instantiate and run the RAG agent with a pre-built context window.
@@ -162,20 +182,25 @@ async def run_agent(
         source_ids=source_ids,
         user_id=user_id,
         chat_id=chat_id,
+        subgraph_mode=subgraph_mode,
     )
+
+    tools = [
+        vector_search,
+        graph_search,
+        search_memory,
+        save_memory,
+        update_memory,
+        delete_memory,
+    ]
+    if subgraph_mode:
+        tools.append(subgraph_query)
 
     agent = Agent[AgentPromptContext](
         name="GraphLM RAG Agent",
         model=settings.OPENAI_LLM_MODEL,
         instructions=_build_system_prompt(ctx),
-        tools=[
-            vector_search,
-            graph_search,
-            search_memory,
-            save_memory,
-            update_memory,
-            delete_memory,
-        ],
+        tools=tools,
     )
 
     result = await Runner.run(
@@ -197,6 +222,7 @@ async def run_agent_stream(
     collection_names: list[str],
     source_ids: list[str],
     chat_id: str,
+    subgraph_mode: bool = False,
 ):
     """
     Stream version of run_agent — yields typed events with metadata.
@@ -245,20 +271,25 @@ async def run_agent_stream(
         source_ids=source_ids,
         user_id=user_id,
         chat_id=chat_id,
+        subgraph_mode=subgraph_mode,
     )
+
+    tools = [
+        vector_search,
+        graph_search,
+        search_memory,
+        save_memory,
+        update_memory,
+        delete_memory,
+    ]
+    if subgraph_mode:
+        tools.append(subgraph_query)
 
     agent = Agent[AgentPromptContext](
         name="GraphLM RAG Agent",
         model=settings.OPENAI_LLM_MODEL,
         instructions=_build_system_prompt(ctx),
-        tools=[
-            vector_search,
-            graph_search,
-            search_memory,
-            save_memory,
-            update_memory,
-            delete_memory,
-        ],
+        tools=tools,
     )
 
     # Use run_streamed instead of run
@@ -295,18 +326,24 @@ async def run_agent_stream(
 
             elif isinstance(event.item, ToolCallOutputItem):
                 # Tool returned output — emit so frontend can log/display
-                # Look up tool_name from the call_id mapping
                 tool_name = active_calls.pop(event.item.call_id, "unknown_tool")
                 tool_output = (
                     event.item.output
                     if isinstance(event.item.output, str)
                     else str(event.item.output)
                 )
+                # subgraph_query output is JSON — must NOT be truncated or the
+                # event_handler cannot parse it. All other tools can be truncated
+                # for display purposes.
+                if tool_name == _SUBGRAPH_TOOL:
+                    display_output = tool_output  # full JSON
+                else:
+                    display_output = tool_output[:500]
                 yield (
                     "tool_output",
                     {
                         "tool_name": tool_name,
-                        "output": tool_output[:500],  # Truncate long outputs
+                        "output": display_output,
                     },
                 )
                 logger.info(f"[Agent] Tool output: {tool_name}")

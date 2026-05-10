@@ -15,7 +15,7 @@ from typing import Optional, List
 from uuid import UUID
 from sqlalchemy.orm import Session
 from sqlalchemy import desc
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.models.source import Source
 from app.models.source_index import SourceIndex
@@ -177,7 +177,7 @@ def set_vector_indexed(db: Session, source_id: UUID, vector_indexed: bool = True
         return None
 
     source_index.vector_indexed = bool(vector_indexed)
-    source_index.vector_indexed_at = datetime.utcnow() if vector_indexed else None
+    source_index.vector_indexed_at = datetime.now(timezone.utc) if vector_indexed else None
     db.commit()
     db.refresh(source_index)
     return source_index
@@ -197,7 +197,7 @@ def set_graph_indexed(
         return None
 
     source_index.graph_indexed = bool(graph_indexed)
-    source_index.graph_indexed_at = datetime.utcnow() if graph_indexed else None
+    source_index.graph_indexed_at = datetime.now(timezone.utc) if graph_indexed else None
     if entity_count is not None:
         try:
             source_index.entity_count = int(entity_count)

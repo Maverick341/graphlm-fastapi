@@ -83,9 +83,13 @@ class AttachSourcesRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     """
     Send message in chat session.
-    
+
     Triggers RAG pipeline with vector + graph retrieval.
     Message is persisted immediately; streaming response follows.
+
+    When subgraph_mode is True, the agent will call the subgraph_query tool
+    alongside its normal response and emit a graph_update SSE event with
+    relevant nodes and edges for the graph panel visualization.
     """
     content: str = Field(
         ...,
@@ -93,33 +97,61 @@ class SendMessageRequest(BaseModel):
         max_length=10000,
         description="User message content"
     )
+    subgraph_mode: bool = Field(
+        default=False,
+        description=(
+            "When True, agent calls subgraph_query tool and emits "
+            "a graph_update SSE event for the KG panel."
+        ),
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
-                "content": "What are the main features of this system?"
+                "content": "What are the main features of this system?",
+                "subgraph_mode": True,
             }
         }
 
 
 class GraphQueryRequest(BaseModel):
     """
-    Query knowledge graph for subgraph extraction.
-    
-    Used by KG Studio panel for interactive visualization.
-    Query is scoped to sources attached to session.
+    Standalone knowledge graph explore query.
+
+    Used by the KG Studio panel's Explore tab — independent of chat.
+    Query is scoped to sources attached to the session.
+    Results are controlled by max_nodes and hop_depth.
     """
     query: str = Field(
         ...,
         min_length=1,
         max_length=1000,
-        description="Natural language search query for knowledge graph"
+        description="Natural language description of the subgraph to explore",
+    )
+    max_nodes: int = Field(
+        default=200,
+        ge=10,
+        le=500,
+        description="Maximum number of nodes to return (10–500, default 200)",
+    )
+    hop_depth: int = Field(
+        default=2,
+        ge=1,
+        le=3,
+        description=(
+            "Relationship traversal depth: "
+            "1 = direct neighbours only, "
+            "2 = neighbours of neighbours (default), "
+            "3 = three hops (wide, may be slow)"
+        ),
     )
 
     class Config:
         json_schema_extra = {
             "example": {
-                "query": "authentication mechanisms"
+                "query": "authentication flow and JWT token handling",
+                "max_nodes": 150,
+                "hop_depth": 2,
             }
         }
 

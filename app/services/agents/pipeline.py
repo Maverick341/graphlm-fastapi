@@ -159,6 +159,7 @@ async def run_agent_pipeline_stream(
     session: ChatSession,
     chat_id: UUID,
     user_message: str,
+    subgraph_mode: bool = False,
 ):
     """
     Streaming pipeline: user message → agent reply (token-by-token).
@@ -207,6 +208,7 @@ async def run_agent_pipeline_stream(
             collection_names=collection_names,
             source_ids=source_ids,
             chat_id=str(chat_id),
+            subgraph_mode=subgraph_mode,
         ):
             yield chunk
 

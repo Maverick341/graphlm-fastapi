@@ -87,6 +87,8 @@ class Settings(BaseSettings):
 
     MEM0_API_KEY: str = ""
 
+    ENABLE_SEMANTIC_CHAT_RETRIEVAL: bool = False
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
@@ -96,3 +98,30 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+# ─────────────────────────────────────────────────────────────────────────
+# Neo4j driver — module-level lazy singleton
+# Pydantic BaseSettings doesn't support mutable @property state reliably.
+# ─────────────────────────────────────────────────────────────────────────
+_neo4j_driver_instance = None
+
+
+def get_neo4j_driver():
+    """Return (and lazily create) the shared AsyncGraphDatabase driver."""
+    from neo4j import AsyncGraphDatabase
+
+    global _neo4j_driver_instance
+    if _neo4j_driver_instance is None:
+        _neo4j_driver_instance = AsyncGraphDatabase.driver(
+            settings.NEO4J_URI,
+            auth=(settings.NEO4J_USERNAME, settings.NEO4J_PASSWORD),
+        )
+    return _neo4j_driver_instance
+
+
+async def close_neo4j_driver():
+    """Close the Neo4j driver gracefully at shutdown."""
+    global _neo4j_driver_instance
+    if _neo4j_driver_instance is not None:
+        await _neo4j_driver_instance.close()
+        _neo4j_driver_instance = None

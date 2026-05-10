@@ -56,6 +56,9 @@ from app.services.agents.context import (
     get_context_summary,
     rebuild_session_context,
 )
+from app.core.config import get_neo4j_driver
+from app.services.agents.graph_query_agent import run_graph_query
+from app.utils.logger import logger
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
 
@@ -406,6 +409,7 @@ async def send_message(
             user_message_id=user_message.id,
             user_content=content,
             background_tasks=background_tasks,
+            subgraph_mode=body.subgraph_mode,
         ),
         media_type="text/event-stream",
         headers={
@@ -537,25 +541,39 @@ async def graph_query(
     if not query:
         raise ApiError(400, "Query cannot be empty")
     
-    # TODO: Query Neo4j for subgraph matching query
-    # TODO: Scope results to session's sources
-    # TODO: Return nodes, edges, and anchor IDs
-    
-    # Placeholder response
-    response_data = GraphResponse(
-        nodes=[],
-        edges=[],
-        anchor_ids=[],
-        query=query,
-        truncated=False,
-    )
-    
-    return ApiResponse(
-        statusCode=200,
-        success=True,
-        message="Graph query executed successfully",
-        data=response_data,
-    )
+    source_ids = [str(source.id) for source in session.sources]
+
+    try:
+        subgraph = await run_graph_query(
+            query=query,
+            source_ids=source_ids,
+            max_nodes=body.max_nodes,
+            hop_depth=body.hop_depth,
+        )
+
+        response_data = GraphResponse(
+            nodes=[n.model_dump() for n in subgraph.nodes],
+            edges=[e.model_dump() for e in subgraph.edges],
+            anchor_ids=[n.id for n in subgraph.nodes],
+            query=query,
+            truncated=subgraph.truncated,
+            reasoning=subgraph.reasoning,
+            interpretation=subgraph.query_interpretation,
+        )
+
+        return ApiResponse(
+            statusCode=200,
+            success=True,
+            message="Graph query executed successfully",
+            data=response_data,
+        )
+
+    except Exception as e:
+        logger.error(
+            f"[GraphQuery] session={session_id} | query='{query}' | error: {e}",
+            exc_info=True,
+        )
+        raise ApiError(500, f"Graph query failed: {str(e)}", code="GRAPH_QUERY_FAILED")
 
 
 @router.get("/{session_id}/graph", response_model=ApiResponse)
@@ -599,26 +617,81 @@ async def get_full_graph(
             "Cannot retrieve graph. Session has no attached sources."
         )
     
-    # TODO: Query Neo4j for all entities and relationships
-    # TODO: Scope to session's sources
-    # TODO: Cap at 500 nodes
-    # TODO: Return nodes, edges, and truncated flag
-    
-    # Placeholder response
-    response_data = FullGraphResponse(
-        nodes=[],
-        edges=[],
-        truncated=False,
-        node_count=0,
-        edge_count=0,
-    )
-    
-    return ApiResponse(
-        statusCode=200,
-        success=True,
-        message="Full graph retrieved successfully",
-        data=response_data,
-    )
+    source_ids = [str(source.id) for source in session.sources]
+
+    try:
+        driver = get_neo4j_driver()
+
+        # Parameterized Cypher — scoped to session sources, no string interpolation
+        cypher = """
+        MATCH (n)-[r]->(m)
+        WHERE n.source_id IN $source_ids
+          AND m.source_id IN $source_ids
+        RETURN n, r, m
+        LIMIT 501
+        """
+
+        async with driver.session() as neo_session:
+            result = await neo_session.run(cypher, source_ids=source_ids)
+            records = await result.fetch(501)
+
+        nodes_dict: dict = {}
+        edges: list = []
+        edges_set: set = set()
+
+        for record in records[:500]:
+            for value in record.values():
+                if hasattr(value, "element_id") and hasattr(value, "labels"):
+                    node_id = value.element_id
+                    if node_id not in nodes_dict:
+                        nodes_dict[node_id] = {
+                            "id": node_id,
+                            "label": next(iter(value.labels), "Unknown"),
+                            "properties": dict(value),
+                        }
+                if hasattr(value, "start_node") and hasattr(value, "end_node"):
+                    src = value.start_node.element_id
+                    tgt = value.end_node.element_id
+                    key = (src, tgt, value.type)
+                    if key not in edges_set:
+                        edges.append({
+                            "source": src,
+                            "target": tgt,
+                            "type": value.type,
+                            "properties": dict(value),
+                        })
+                        edges_set.add(key)
+
+        nodes = list(nodes_dict.values())
+        truncated = len(records) > 500
+
+        if truncated:
+            node_ids = {n["id"] for n in nodes}
+            edges = [e for e in edges if e["source"] in node_ids and e["target"] in node_ids]
+
+        response_data = FullGraphResponse(
+            nodes=nodes,
+            edges=edges,
+            truncated=truncated,
+            node_count=len(nodes),
+            edge_count=len(edges),
+        )
+
+        logger.info(
+            f"[FullGraph] session={session_id} | "
+            f"nodes={len(nodes)}, edges={len(edges)}, truncated={truncated}"
+        )
+
+        return ApiResponse(
+            statusCode=200,
+            success=True,
+            message="Full graph retrieved successfully",
+            data=response_data,
+        )
+
+    except Exception as e:
+        logger.error(f"[FullGraph] session={session_id} | error: {e}", exc_info=True)
+        raise ApiError(500, f"Failed to retrieve graph: {str(e)}", code="GRAPH_RETRIEVAL_FAILED")
 
 
 # ─────────────────────────────────────────────────────────────────────────
