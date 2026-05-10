@@ -1,3 +1,5 @@
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -12,11 +14,24 @@ from app.api.limiter import limiter
 from app.utils.api_error import register_exception_handlers
 from app.core.config import settings
 from app.services.cloudinary_service import configure_cloudinary
+from app.db.listeners.source_status_listener import source_status_listener
 
-app = FastAPI(title="FastAPI Auth")
 
-# Initialize Cloudinary on startup
-configure_cloudinary()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Application lifespan: startup → yield → shutdown."""
+    # --- Startup ---
+    configure_cloudinary()
+    await source_status_listener.connect()
+
+    yield  # Application runs here
+
+    # --- Shutdown ---
+    await source_status_listener.disconnect()
+
+
+app = FastAPI(title="FastAPI Auth", lifespan=lifespan)
+
 
 app.add_middleware(
     CORSMiddleware,

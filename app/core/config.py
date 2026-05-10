@@ -1,6 +1,7 @@
 from pathlib import Path
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 
 # Load .env into os.environ FIRST — ensures third-party libraries
 # (OpenAI Agents SDK, langchain, mem0, etc.) that read env vars
@@ -12,6 +13,24 @@ load_dotenv(_env_path, override=False)  # override=False: real env vars take pri
 class Settings(BaseSettings):
     # Database Configuration
     DATABASE_URL: str
+
+    # Async DSN for asyncpg-based services (e.g. PG LISTEN/NOTIFY listener).
+    # asyncpg requires plain `postgresql://` — no SQLAlchemy driver prefix.
+    # If not set explicitly in .env, it is auto-derived from DATABASE_URL.
+    ASYNC_DATABASE_URL: str = ""
+
+    @model_validator(mode="after")
+    def _derive_async_url(self) -> "Settings":
+        """Auto-derive ASYNC_DATABASE_URL from DATABASE_URL when not set."""
+        if not self.ASYNC_DATABASE_URL:
+            # Strip SQLAlchemy driver suffix: postgresql+psycopg2:// → postgresql://
+            url = self.DATABASE_URL
+            if "+" in url.split("://")[0]:
+                scheme, rest = url.split("://", 1)
+                plain_scheme = scheme.split("+")[0]  # e.g. "postgresql"
+                url = f"{plain_scheme}://{rest}"
+            self.ASYNC_DATABASE_URL = url
+        return self
 
     # JWT Configuration - Access Token
     ACCESS_TOKEN_SECRET: str

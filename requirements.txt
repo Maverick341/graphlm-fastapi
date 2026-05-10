@@ -1,12 +1,12 @@
 alembic
 alembic-postgresql-enum
+asyncpg
 bcrypt==4.0.1
 cloudinary
 email-validator
 fastapi
 fastapi-mail
 jinja2
-mem0ai
 passlib
 psycopg2-binary
 pydantic
@@ -21,11 +21,12 @@ uvicorn
 
 # Indexing & LLM Integration
 langchain
-langchain_community
-langchain_openai
-langchain_experimental
-langchain_qdrant
-langchain_neo4j
-qdrant_client
-python-docx
+langchain-community
+langchain-experimental
+langchain-openai
+langchain-qdrant
+langchain-neo4j
+mem0ai
 openai-agents
+python-docx
+qdrant-client

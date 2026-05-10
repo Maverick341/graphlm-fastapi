@@ -17,10 +17,13 @@ from fastapi import (
     Form,
     BackgroundTasks,
 )
+from starlette.responses import StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 from uuid import UUID
 from typing import Optional, List
+import asyncio
+import json
 import tempfile
 import os
 import shutil
@@ -53,8 +56,22 @@ from app.services.indexing.pipeline import run_indexing_pipeline
 from app.services.cloudinary_service import upload_document_to_cloudinary, delete_document_from_cloudinary
 from app.services.indexing.vector_index import delete_qdrant_collection
 from app.services.indexing.graph_index import delete_graph_by_source_id
+from app.db.listeners.source_status_listener import source_status_listener
 
 router = APIRouter(prefix="/sources", tags=["sources"])
+
+# Terminal statuses — SSE stream closes automatically when reached
+_TERMINAL_STATUSES = {"indexed", "failed"}
+
+
+def _sse_event(event: str, data: dict) -> str:
+    """
+    Format a single Server-Sent Event frame.
+
+    `default=str` handles UUID / datetime values that are not JSON-serialisable
+    out of the box.  The client reads `event:` and `data:` fields.
+    """
+    return f"event: {event}\ndata: {json.dumps(data, default=str)}\n\n"
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -400,8 +417,8 @@ async def get_source(
     )
 
 
-@router.get("/{source_id}/status", response_model=ApiResponse)
-@limiter.limit("20/minute")
+@router.get("/{source_id}/status")
+@limiter.limit("10/minute")
 async def get_source_status(
     request: Request,
     source_id: UUID,
@@ -409,44 +426,153 @@ async def get_source_status(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Get detailed indexing status for a source.
-    
-    Shows progress for both vector (Qdrant) and graph (Neo4j) indexing.
-    Frontend polls this endpoint to show partial progress.
-    
-    Status lifecycle:
-    1. "uploaded" - Source created, indexing not started
-    2. "indexing" - Vector or graph indexing in progress
-    3. "indexed" - Both vector and graph indexing complete
-    4. "failed" - Indexing encountered error
-    
+    Stream real-time indexing status for a source via Server-Sent Events.
+
+    The connection stays open until:
+      a) The client closes it (browser tab close, EventSource.close()).
+      b) The source reaches a terminal state: "indexed" or "failed".
+
+    Event types emitted:
+      snapshot              — Immediate first event: current DB state.
+      source_status_changed — Fired when sources.status column changes.
+      source_index_changed  — Fired when vector/graph indexed flags change.
+      complete              — Final event before the stream closes.
+
+    Heartbeat comments (`: heartbeat`) are sent every 20 s to prevent
+    proxies and load balancers from closing idle connections.
+
+    Frontend usage (JavaScript):
+        const es = new EventSource(`/sources/${id}/status`, { withCredentials: true });
+        es.addEventListener("snapshot",              e => console.log(JSON.parse(e.data)));
+        es.addEventListener("source_status_changed", e => console.log(JSON.parse(e.data)));
+        es.addEventListener("source_index_changed",  e => console.log(JSON.parse(e.data)));
+        es.addEventListener("complete",              e => { console.log(e.data); es.close(); });
+
     Args:
-        source_id: Source ID (UUID)
-        db: Database session
-        current_user: Authenticated user
-    
+        source_id:    Source UUID.
+        db:           SQLAlchemy session (used only for initial snapshot).
+        current_user: Authenticated user.
+
     Returns:
-        ApiResponse with SourceStatusResponse
-        Shows vector_indexed and graph_indexed status separately
-    
+        StreamingResponse (text/event-stream) — stays alive until terminal state.
+
     Raises:
-        ApiError(404): If source not found
-        ApiError(403): If source doesn't belong to user
+        ApiError(404): Source not found.
+        ApiError(403): Source does not belong to current user.
     """
+    # --- Auth + ownership (runs synchronously before streaming begins) ---
     source = source_repo.get_source_by_id(db, source_id)
     if not source:
         raise ApiError(404, "Source not found")
-    
+
     verify_ownership(source.user_id, current_user.id, "source")
-    
-    # Build response
-    response_data = build_source_status_response(source)
-    
-    return ApiResponse(
-        statusCode=200,
-        success=True,
-        message="Source status retrieved successfully",
-        data=response_data,
+
+    # Snapshot the current state so the client gets immediate feedback
+    initial_status: SourceStatusResponse = build_source_status_response(source)
+    source_id_str = str(source_id)
+
+    async def event_generator():
+        # 1. Always emit the current DB snapshot first
+        yield _sse_event("snapshot", initial_status.model_dump())
+
+        # 2. If already in a terminal state AND graph is also resolved, close immediately.
+        # If overall_status is already "indexed" but graph is still pending (graph.indexed is
+        # False and no error_message yet), we must stay open to receive the graph NOTIFY.
+        already_failed = initial_status.overall_status == "failed"
+        already_indexed = initial_status.overall_status == "indexed"
+        graph_already_resolved = (
+            initial_status.graph.indexed is True
+            or initial_status.error_message is not None
+        )
+
+        if already_failed or (already_indexed and graph_already_resolved):
+            yield _sse_event(
+                "complete",
+                {
+                    "message": "Indexing already complete.",
+                    "overall_status": initial_status.overall_status,
+                },
+            )
+            return
+
+        # 3. Register a personal queue with the global PG NOTIFY listener.
+        #    Two-condition state machine: we close only when BOTH are true:
+        #      a) overall_status has reached "indexed" or "failed"  (sources trigger)
+        #      b) graph indexing has resolved — success OR error     (source_indexes trigger)
+        #
+        #    Pipeline order that caused the original bug:
+        #      vector_indexed=True  → source_index_changed (graph still False)
+        #      status="indexed"     → source_status_changed ← OLD code closed here ❌
+        #      graph_indexed=True   → source_index_changed  ← frontend never saw this
+        #
+        #    With the state machine the stream stays alive until the graph event arrives.
+        queue = source_status_listener.subscribe(source_id_str)
+        # Seed from snapshot: if status is already "indexed" when the client connects,
+        # the source_status_changed NOTIFY already fired before subscription — it will
+        # never arrive again. Pre-set the flag so the state machine only waits for the
+        # graph_resolved condition.
+        reached_indexed_status: bool = already_indexed
+        graph_resolved: bool = False           # set when graph_indexed=True or error_message set
+        try:
+            while True:
+                # Check whether the HTTP client has gone away
+                if await request.is_disconnected():
+                    logger.info("[SSE] Client disconnected for source %s", source_id_str)
+                    break
+
+                # Wait for the next notification with a heartbeat timeout
+                try:
+                    data: dict = await asyncio.wait_for(queue.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    # Send a comment line — keeps proxies alive, invisible to client
+                    yield ": heartbeat\n\n"
+                    continue
+
+                # Emit the notification payload as an SSE event
+                event_type: str = data.get("event", "update")
+                yield _sse_event(event_type, data)
+
+                # ── Update state machine ──────────────────────────────────
+
+                if event_type == "source_status_changed":
+                    overall = data.get("overall_status")
+
+                    # Hard-fail: close immediately, graph is moot
+                    if overall == "failed":
+                        yield _sse_event("complete", {"overall_status": "failed"})
+                        break
+
+                    if overall == "indexed":
+                        reached_indexed_status = True
+
+                elif event_type == "source_index_changed":
+                    # Graph is resolved when it either succeeded or recorded an error
+                    if (
+                        data.get("graph_indexed") is True
+                        or data.get("error_message") is not None
+                    ):
+                        graph_resolved = True
+
+                # ── Close only when BOTH conditions are satisfied ─────────
+                if reached_indexed_status and graph_resolved:
+                    yield _sse_event(
+                        "complete",
+                        {"overall_status": "indexed", "graph_resolved": graph_resolved},
+                    )
+                    break
+        finally:
+            # Always clean up — even on abrupt client disconnect
+            source_status_listener.unsubscribe(source_id_str, queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Tells Nginx not to buffer this response — critical for SSE
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
