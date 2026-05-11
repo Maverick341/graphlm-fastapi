@@ -105,7 +105,8 @@ const useChatStore = create((set, get) => ({
       toast.success('Source attached to session');
     } catch (err) {
       console.error(err);
-      toast.error('Failed to attach source');
+      const errorMessage = err.response?.data?.message || 'Failed to attach source';
+      toast.error(errorMessage);
       throw err;
     }
   },
@@ -117,7 +118,8 @@ const useChatStore = create((set, get) => ({
       toast.success('Source removed from session');
     } catch (err) {
       console.error(err);
-      toast.error('Failed to remove source');
+      const errorMessage = err.response?.data?.message || 'Failed to remove source';
+      toast.error(errorMessage);
       throw err;
     }
   },

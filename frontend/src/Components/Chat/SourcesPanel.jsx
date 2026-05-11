@@ -1,14 +1,21 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { Plus, Search, FileText, GitBranch, ChevronRight, PanelLeftClose, MoreVertical, Trash2 } from 'lucide-react'
-import AddSourceModal from './AddSourceModal'
 import useChatStore from '@/store/chatStore'
 
-function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
-  const [isAddModalOpen, setIsAddModalOpen] = useState(false)
+function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddModal, handleOpenSource }) {
   const [selectedSources, setSelectedSources] = useState([])
   const [openMenuId, setOpenMenuId] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
   const sources = currentSession?.sources || []
   const { removeSource } = useChatStore()
+
+  const filteredSources = useMemo(() => {
+    if (!searchQuery.trim()) return sources;
+    const lowerQuery = searchQuery.toLowerCase();
+    return sources.filter(source => 
+      source.title?.toLowerCase().includes(lowerQuery)
+    );
+  }, [sources, searchQuery]);
 
   const FileIcon = ({ filename, className }) => {
     const ext = filename?.split('.').pop()?.toLowerCase();
@@ -42,9 +49,11 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
 
   const handleSelectAll = (e) => {
     if (e.target.checked) {
-      setSelectedSources(sources.map(s => s.id));
+      const newSelections = new Set([...selectedSources, ...filteredSources.map(s => s.id)]);
+      setSelectedSources(Array.from(newSelections));
     } else {
-      setSelectedSources([]);
+      const filteredIds = new Set(filteredSources.map(s => s.id));
+      setSelectedSources(prev => prev.filter(id => !filteredIds.has(id)));
     }
   };
 
@@ -71,7 +80,7 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
 
       <div className="px-4 pb-3">
         <button 
-          onClick={() => setIsAddModalOpen(true)}
+          onClick={onOpenAddModal}
           className="w-full py-2 flex items-center justify-center gap-2 border border-gray-300 dark:border-gray-700 rounded-full text-sm font-medium hover:bg-gray-50 dark:hover:bg-[#2a2a2a] transition-colors text-gray-900 dark:text-white"
         >
           <Plus className="w-4 h-4" /> Add source
@@ -83,6 +92,8 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 dark:text-gray-500" />
           <input
             type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="Search for sources"
             className="w-full bg-gray-100 dark:bg-[#2a2a2a] border border-transparent focus:border-gray-300 dark:focus:border-gray-600 rounded-lg pl-9 pr-4 py-1.5 text-sm text-gray-900 dark:text-white outline-none transition-colors placeholder:text-gray-500"
           />
@@ -91,19 +102,19 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
 
       <div className="flex-1 overflow-y-auto px-2 mt-2 space-y-1">
         {/* Select All Header */}
-        {sources.length > 0 && (
+        {filteredSources.length > 0 && (
           <div className="flex items-center justify-end px-2 py-2 mb-2 border-b border-gray-200 dark:border-gray-800 gap-3">
             <span className="text-xs text-gray-500 dark:text-gray-400">Select all</span>
             <input 
               type="checkbox" 
-              checked={sources.length > 0 && selectedSources.length === sources.length}
+              checked={filteredSources.length > 0 && filteredSources.every(s => selectedSources.includes(s.id))}
               onChange={handleSelectAll}
               className="rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-white dark:focus:ring-offset-gray-900 cursor-pointer w-4 h-4 ml-1"
             />
           </div>
         )}
 
-        {sources.map(source => {
+        {filteredSources.map(source => {
           const isGithub = source.type === 'github'
           const progress = sourceProgress[source.id];
           const isIndexing = source.status !== 'indexed' && source.status !== 'failed';
@@ -113,7 +124,10 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
 
           return (
             <div key={source.id} className={`flex items-center justify-between p-2 rounded-lg hover:bg-gray-50 dark:hover:bg-[#2a2a2a] group cursor-pointer ${showBlink ? 'animate-pulse bg-gray-50/50 dark:bg-[#2a2a2a]/40' : ''}`}>
-              <div className="flex items-center gap-3 overflow-hidden">
+              <div 
+                onClick={() => handleOpenSource && handleOpenSource(source)}
+                className="flex items-center gap-3 overflow-hidden flex-1"
+              >
                 {isGithub ? (
                   <GitBranch className="w-4 h-4 text-gray-500 dark:text-gray-400 shrink-0" />
                 ) : (
@@ -163,18 +177,12 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse }) {
             </div>
           )
         })}
-        {sources.length === 0 && (
+        {filteredSources.length === 0 && (
           <div className="px-4 py-8 text-center text-sm text-gray-500">
-            No sources attached yet.
+            {searchQuery.trim() ? "No sources match your search." : "No sources attached yet."}
           </div>
         )}
       </div>
-
-      <AddSourceModal 
-        isOpen={isAddModalOpen} 
-        onClose={() => setIsAddModalOpen(false)}
-        currentSession={currentSession}
-      />
     </div>
   )
 }

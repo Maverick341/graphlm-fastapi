@@ -289,7 +289,7 @@ async def detach_source_from_session(
         raise ApiError(400, "Source not attached to this session")
 
     if len(session.sources) == 1:
-        raise ApiError(400, "Session must have at least one source")
+        raise ApiError(400, "Chat must have at least one source")
 
     session.sources.remove(attached)
     db.commit()

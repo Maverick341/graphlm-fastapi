@@ -5,7 +5,7 @@ Includes request validation schemas and response schemas following the ApiRespon
 """
 
 from pydantic import BaseModel, Field
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Dict
 from uuid import UUID
 from datetime import datetime
 
@@ -170,6 +170,11 @@ class SourceSummaryResponse(BaseModel):
     title: str = Field(description="Source title")
     type: str = Field(description="Source type: 'pdf' or 'github'")
     status: str = Field(description="Indexing status: 'uploaded', 'indexing', 'indexed', or 'failed'")
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Type-specific metadata",
+        validation_alias="source_metadata"
+    )
     created_at: datetime = Field(description="Source creation timestamp")
 
     class Config:

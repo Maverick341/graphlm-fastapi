@@ -73,6 +73,11 @@ class SourceResponse(BaseModel):
     status: str = Field(
         description="Indexing status: 'uploaded', 'indexing', 'indexed', or 'failed'"
     )
+    metadata: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Type-specific metadata (pdf or github)",
+        validation_alias="source_metadata"
+    )
     created_at: datetime = Field(description="Source creation timestamp")
 
     class Config:
