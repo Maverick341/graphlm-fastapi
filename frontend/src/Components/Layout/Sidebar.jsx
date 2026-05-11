@@ -427,8 +427,10 @@ function Sidebar() {
                 className={`relative w-full flex items-center justify-between px-4 py-3 text-sm transition-colors cursor-pointer ${
                   isDark ? 'hover:bg-[#2f2f2f]' : 'hover:bg-gray-100'
                 }`}
-                onMouseEnter={() => setThemeSubmenuOpen(true)}
-                onMouseLeave={() => setThemeSubmenuOpen(false)}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  setThemeSubmenuOpen(!themeSubmenuOpen)
+                }}
               >
                 <div className="flex items-center gap-3">
                   <Sun className="w-4 h-4" />

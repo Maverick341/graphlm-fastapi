@@ -11,6 +11,8 @@ const useSourceStore = create((set, get) => ({
   total: 0,
   page: 0,
   limit: 10,
+  autoAttach: true,
+  setAutoAttach: (value) => set({ autoAttach: value }),
 
   // Fetch sources
   fetchSources: async (skip = 0, limit = 10, append = false) => {
@@ -49,6 +51,13 @@ const useSourceStore = create((set, get) => ({
       // We don't automatically add it to the list yet unless we want to poll/refresh
       // or we can optimistically prepend it
       toast.success('Document uploaded successfully. Indexing started.');
+      
+      // Background subscribe to show toasts even if not attached to current session
+      const sourceId = newSourceData.source_id || newSourceData.id;
+      if (sourceId) {
+        sourceService.subscribeToSourceStatus(sourceId, {}, title || file.name);
+      }
+      
       return newSourceData;
     } catch (err) {
       console.error(err);
@@ -72,6 +81,13 @@ const useSourceStore = create((set, get) => ({
       
       const response = await sourceService.addGithub(data);
       toast.success('GitHub repository added. Indexing started.');
+      
+      // Background subscribe to show toasts even if not attached to current session
+      const sourceId = response.data.source_id || response.data.id;
+      if (sourceId) {
+        sourceService.subscribeToSourceStatus(sourceId, {}, title || 'GitHub Repo');
+      }
+      
       return response.data;
     } catch (err) {
       console.error(err);

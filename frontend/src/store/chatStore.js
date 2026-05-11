@@ -37,7 +37,11 @@ const useChatStore = create((set, get) => ({
   fetchSession: async (sessionId) => {
     try {
       const data = await chatSessionService.getSessionById(sessionId);
-      set({ currentSession: data.data || data });
+      const sessionData = data.data || data;
+      set((state) => ({ 
+        currentSession: sessionData,
+        sessions: state.sessions.map(s => s.id === sessionId ? sessionData : s)
+      }));
     } catch (err) {
       console.error(err);
       toast.error('Failed to load session details');
@@ -91,6 +95,30 @@ const useChatStore = create((set, get) => ({
     } catch (err) {
       console.error(err);
       toast.error('Failed to rename session');
+    }
+  },
+
+  attachSources: async (sessionId, sourceIds) => {
+    try {
+      await chatSessionService.attachSources(sessionId, sourceIds);
+      get().fetchSession(sessionId);
+      toast.success('Source attached to session');
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to attach source');
+      throw err;
+    }
+  },
+
+  removeSource: async (sessionId, sourceId) => {
+    try {
+      await chatSessionService.removeSource(sessionId, sourceId);
+      get().fetchSession(sessionId);
+      toast.success('Source removed from session');
+    } catch (err) {
+      console.error(err);
+      toast.error('Failed to remove source');
+      throw err;
     }
   },
 

@@ -1,4 +1,8 @@
 import axiosInstance from "./axios";
+import { toast } from 'sonner';
+
+// Keep track of shown toasts to prevent duplicates in React Strict Mode
+const shownToasts = new Set();
 
 const sourceService = {
   // Upload a document (PDF, DOCX, TXT, MD)
@@ -44,7 +48,7 @@ const sourceService = {
   },
 
   // Subscribe to real-time indexing status via Server-Sent Events (SSE)
-  subscribeToSourceStatus: (sourceId, callbacks = {}) => {
+  subscribeToSourceStatus: (sourceId, callbacks = {}, title = 'Source') => {
     const url = sourceService.getSourceStatusUrl(sourceId);
     // withCredentials true is crucial for passing the auth cookies to the SSE endpoint
     const es = new EventSource(url, { withCredentials: true });
@@ -55,9 +59,28 @@ const sourceService = {
     if (callbacks.onStatusChanged) {
       es.addEventListener("source_status_changed", (e) => callbacks.onStatusChanged(JSON.parse(e.data)));
     }
-    if (callbacks.onIndexChanged) {
-      es.addEventListener("source_index_changed", (e) => callbacks.onIndexChanged(JSON.parse(e.data)));
-    }
+    
+    es.addEventListener("source_index_changed", (e) => {
+      const data = JSON.parse(e.data);
+      
+      // Handle Toasts internally to avoid duplication and logic spread
+      if (data.vector_indexed) {
+        const toastId = `${sourceId}-vector`;
+        if (!shownToasts.has(toastId)) {
+          shownToasts.add(toastId);
+          toast.success(`"${title}" vector indexed (Partially indexed)`);
+        }
+      }
+      if (data.graph_indexed) {
+        const toastId = `${sourceId}-graph`;
+        if (!shownToasts.has(toastId)) {
+          shownToasts.add(toastId);
+          toast.success(`"${title}" graph indexed (Fully indexed)`);
+        }
+      }
+
+      if (callbacks.onIndexChanged) callbacks.onIndexChanged(data);
+    });
     
     es.addEventListener("complete", (e) => {
       if (callbacks.onComplete) callbacks.onComplete(JSON.parse(e.data));

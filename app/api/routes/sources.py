@@ -133,14 +133,16 @@ async def upload_document(
     
     if file_ext not in supported_types:
         raise ApiError(
-            400, 
+            400,
             f"Unsupported file type: {file_ext}. Supported types: PDF, DOCX, TXT, MD, TEXT, MARKDOWN"
         )
     
     # Validate title
-    title = title.strip()
+    if title:
+        title = title.strip()
+    
     if not title:
-        raise ApiError(400, "Title cannot be empty")
+        title = file.filename
     
     # TODO: Validate file size (e.g., max 50MB)
     
@@ -272,11 +274,18 @@ async def add_github(
     if 'github.com' not in body.repo_url.lower():
         raise ApiError(400, "Repository URL must be a valid GitHub URL")
     
+    title = body.title
+    if not title:
+        url_parts = body.repo_url.rstrip('/').split('/')
+        title = url_parts[-1] if url_parts else "GitHub Repository"
+        if title.endswith('.git'):
+            title = title[:-4]
+    
     # Create source via repository with initial status
     source = source_repo.create_source(
         db,
         current_user.id,
-        body.title,
+        title,
         SourceType.github.value,
         metadata={
             "repo_url": body.repo_url,
