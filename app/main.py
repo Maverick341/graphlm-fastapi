@@ -70,7 +70,10 @@ if __name__ == "__main__":
     from app.utils.logger import logger
 
     port = settings.PORT
-    host = "127.0.0.1"
+    host = settings.HOST
 
     logger.info(f"🚀 Starting server on http://{host}:{port}")
+    logger.info(f"📚 Swagger docs: http://{host}:{port}/docs")
+    logger.info(f"📖 ReDoc docs: http://{host}:{port}/redoc")
+
     uvicorn.run("app.main:app", host=host, port=port, reload=True)

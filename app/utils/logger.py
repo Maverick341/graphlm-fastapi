@@ -20,7 +20,7 @@ def setup_logger(name: str = "graphlm") -> logging.Logger:
         
         # Format the log output
         formatter = logging.Formatter(
-            fmt="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
+            fmt="%(asctime)s | %(levelname)-8s | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         console_handler.setFormatter(formatter)

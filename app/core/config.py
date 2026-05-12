@@ -42,6 +42,7 @@ class Settings(BaseSettings):
 
     # Application Configuration
     PORT: int = 4000
+    HOST: str = "127.0.0.1"
     ENVIRONMENT: str = "development"  # development, testing, production
     DEBUG: bool = False
     BASE_URL: str = "http://localhost:4000"
