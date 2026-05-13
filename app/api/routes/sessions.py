@@ -673,7 +673,7 @@ async def get_full_graph(
                         edges.append({
                             "source": src,
                             "target": tgt,
-                            "type": value.type,
+                            "relationship_type": value.type,
                             "properties": dict(value),
                         })
                         edges_set.add(key)

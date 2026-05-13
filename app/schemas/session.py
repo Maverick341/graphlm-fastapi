@@ -316,7 +316,7 @@ class GraphNode(BaseModel):
     """
     id: str = Field(description="Node ID")
     label: str = Field(description="Node display label")
-    properties: dict = Field(
+    properties: Dict[str, Any] = Field(
         default_factory=dict,
         description="Node properties (e.g., name, type, description)"
     )
@@ -329,7 +329,7 @@ class GraphEdge(BaseModel):
     source: str = Field(description="Source node ID")
     target: str = Field(description="Target node ID")
     relationship_type: str = Field(description="Relationship type/label")
-    properties: dict = Field(
+    properties: Dict[str, Any] = Field(
         default_factory=dict,
         description="Edge properties (e.g., weight, metadata)"
     )

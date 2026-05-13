@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, memo, useMemo } from 'react'
 import { ArrowUp, Loader2 } from 'lucide-react'
 import { useChatStore } from '@/store'
 import ReactMarkdown from 'react-markdown'
@@ -8,6 +8,68 @@ import { CodeBlock } from './Renderers/CodeBlock'
 import { TableRenderer, TableHead, TableBody, TableRow, TableHeader, TableCell } from './Renderers/TableRenderer'
 import { CitationBadge } from './Renderers/CitationBadge'
 
+const MARKDOWN_COMPONENTS = {
+  code: CodeBlock,
+  table: TableRenderer,
+  thead: TableHead,
+  tbody: TableBody,
+  tr: TableRow,
+  th: TableHeader,
+  td: TableCell,
+}
+
+function renderParsedContent(content) {
+  const blocks = parseContent(content)
+  return blocks.map((block, i) => {
+    if (block.type === 'citation') {
+      return <CitationBadge key={i} source={block.source} page={block.page} />
+    }
+    return (
+      <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={MARKDOWN_COMPONENTS}>
+        {block.value}
+      </ReactMarkdown>
+    )
+  })
+}
+
+// Memoised bubble — only re-renders when its own message object reference changes.
+// During streaming only the one streaming message updates; all completed ones stay frozen.
+const MessageBubble = memo(function MessageBubble({ msg }) {
+  return (
+    <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+      <div
+        className={`max-w-[85%] lg:max-w-2xl px-5 py-3 ${
+          msg.role === 'user'
+            ? 'bg-blue-600 dark:bg-[#303134] text-white rounded-2xl rounded-tr-sm'
+            : 'bg-white dark:bg-[#2d2d2d] text-gray-900 dark:text-gray-200 shadow-sm border border-gray-200 dark:border-gray-700/50 rounded-2xl rounded-tl-sm'
+        } ${msg.status === 'error' ? 'border-red-500 border' : ''}`}
+      >
+        {msg.status === 'streaming' && !msg.content ? (
+          <div className="flex items-center gap-3 text-gray-500 dark:text-gray-400">
+            <Loader2 className="w-4 h-4 animate-spin" />
+            <span className="text-sm italic">
+              {msg.metadata?.phase
+                ? msg.metadata.phase
+                    .split('_')
+                    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+                    .join(' ') + '...'
+                : 'Thinking...'}
+            </span>
+          </div>
+        ) : (
+          <div className={`text-base leading-relaxed prose dark:prose-invert prose-p:my-1 prose-pre:bg-transparent dark:prose-pre:bg-transparent max-w-none ${msg.role === 'user' ? 'prose-p:text-white prose-a:text-blue-200' : ''}`}>
+            {msg.role === 'user' ? (
+              <p>{msg.content}</p>
+            ) : (
+              renderParsedContent(msg.content)
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+})
+
 function ChatPanel({ currentSession, isVectorIndexing }) {
   const [input, setInput] = useState('')
   const { messages, sendMessage, stopStreaming, isStreaming, isLoadingMessages, isFetchingMore, hasMoreMessages, loadMoreMessages } = useChatStore()
@@ -16,23 +78,39 @@ function ChatPanel({ currentSession, isVectorIndexing }) {
   const previousScrollHeight = useRef(0)
   const isFetchingRef = useRef(false)
 
-  const scrollToBottom = () => {
+  const isAtBottom = useRef(true)
+
+  // Pin the scroll to the bottom during streaming — instant, no animation fighting
+  const pinToBottom = () => {
+    const el = scrollContainerRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }
+
+  // Smooth scroll only for the initial jump when user sends a message
+  const smoothScrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }
 
   useEffect(() => {
     if (isFetchingRef.current && scrollContainerRef.current) {
+      // Preserve scroll position when prepending old messages
       const newScrollHeight = scrollContainerRef.current.scrollHeight;
       scrollContainerRef.current.scrollTop = newScrollHeight - previousScrollHeight.current;
       isFetchingRef.current = false;
-    } else if (!isFetchingMore && !isFetchingRef.current) {
-      scrollToBottom()
+    } else if (!isFetchingMore && !isFetchingRef.current && isAtBottom.current) {
+      // Only auto-scroll if user is already near the bottom.
+      // Use instant scroll during streaming to avoid competing animations.
+      pinToBottom()
     }
   }, [messages])
 
   const handleScroll = (e) => {
-    if (e.target.scrollTop === 0 && hasMoreMessages && !isFetchingMore && currentSession) {
-      previousScrollHeight.current = e.target.scrollHeight;
+    const el = e.target
+    // Track if user is near the bottom (within 80px threshold)
+    isAtBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+
+    if (el.scrollTop === 0 && hasMoreMessages && !isFetchingMore && currentSession) {
+      previousScrollHeight.current = el.scrollHeight;
       isFetchingRef.current = true;
       loadMoreMessages(currentSession.id);
     }
@@ -44,39 +122,10 @@ function ChatPanel({ currentSession, isVectorIndexing }) {
 
     const content = input
     setInput('')
+    isAtBottom.current = true // ensure we scroll to new message
     await sendMessage(currentSession.id, content)
   }
 
-  const renderParsedContent = (content) => {
-    const blocks = parseContent(content);
-    return blocks.map((block, index) => {
-      if (block.type === 'citation') {
-        return <CitationBadge key={index} source={block.source} page={block.page} />;
-      }
-      
-      if (block.type === 'markdown') {
-        return (
-          <ReactMarkdown
-            key={index}
-            remarkPlugins={[remarkGfm]}
-            components={{
-              code: CodeBlock,
-              table: TableRenderer,
-              thead: TableHead,
-              tbody: TableBody,
-              tr: TableRow,
-              th: TableHeader,
-              td: TableCell
-            }}
-          >
-            {block.value}
-          </ReactMarkdown>
-        );
-      }
-      
-      return null;
-    });
-  };
 
   return (
     <div className="flex h-full flex-col bg-gray-50 dark:bg-[#212121] relative">
@@ -121,40 +170,7 @@ function ChatPanel({ currentSession, isVectorIndexing }) {
           ) : (
             <>
               {messages.map(msg => (
-                <div
-                  key={msg.id}
-                  className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                >
-                  <div
-                    className={`max-w-[85%] lg:max-w-2xl px-5 py-3 ${
-                      msg.role === 'user'
-                        ? 'bg-blue-600 dark:bg-[#303134] text-white rounded-2xl rounded-tr-sm'
-                        : 'bg-white dark:bg-[#2d2d2d] text-gray-900 dark:text-gray-200 shadow-sm border border-gray-200 dark:border-gray-700/50 rounded-2xl rounded-tl-sm'
-                    } ${msg.status === 'error' ? 'border-red-500 border' : ''}`}
-                  >
-                    {msg.status === 'streaming' && !msg.content ? (
-                      <div className="flex items-center gap-3 text-gray-500 dark:text-gray-400">
-                        <Loader2 className="w-4 h-4 animate-spin" />
-                        <span className="text-sm italic">
-                          {msg.metadata?.phase 
-                            ? msg.metadata.phase
-                                .split('_')
-                                .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-                                .join(' ') + '...'
-                            : 'Thinking...'}
-                        </span>
-                      </div>
-                    ) : (
-                      <div className={`text-base leading-relaxed prose dark:prose-invert prose-p:my-1 prose-pre:bg-transparent dark:prose-pre:bg-transparent max-w-none ${msg.role === 'user' ? 'prose-p:text-white prose-a:text-blue-200' : ''}`}>
-                        {msg.role === 'user' ? (
-                           <p>{msg.content}</p>
-                        ) : (
-                           renderParsedContent(msg.content)
-                        )}
-                      </div>
-                    )}
-                  </div>
-                </div>
+                <MessageBubble key={msg.id} msg={msg} />
               ))}
             </>
           )}

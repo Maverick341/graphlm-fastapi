@@ -1,64 +1,91 @@
-import { LayoutDashboard, Network, Share2, Layers, BookOpen, PanelRightClose } from 'lucide-react'
+import { useState } from 'react'
+import { LayoutTemplate, ChevronRight, PanelRightClose } from 'lucide-react'
+import { useChatStore } from '@/store'
+import { CanvasHome } from './Canvas/CanvasHome'
+import { GraphView } from './Canvas/GraphView'
+import { DocsView } from './Canvas/DocsView'
 
-function StudioPanel({ onCollapse }) {
-  const tools = [
-    { name: 'Graph Explore', icon: Network, color: 'text-blue-500 dark:text-blue-400', bg: 'bg-[#2a2a2a]' },
-    { name: 'Knowledge Map', icon: Share2, color: 'text-green-500 dark:text-green-400', bg: 'bg-[#2a2a2a]' },
-    { name: 'Document Summary', icon: BookOpen, color: 'text-yellow-500 dark:text-yellow-400', bg: 'bg-[#2a2a2a]' },
-    { name: 'Entity Layers', icon: Layers, color: 'text-purple-500 dark:text-purple-400', bg: 'bg-[#2a2a2a]' },
-  ]
+const TOOL_LABELS = {
+  graph: 'Graph View',
+  docs: 'Docs',
+}
+
+function CanvasPanel({ onCollapse, currentSession }) {
+  const [activeTool, setActiveTool] = useState(null) // null = home
+  const { graphData, subgraphMode, setSubgraphMode } = useChatStore()
+
+  // Disable sync mode whenever the user leaves Graph View
+  const handleBack = () => {
+    if (activeTool === 'graph') setSubgraphMode(false)
+    setActiveTool(null)
+  }
+
+  const handleSelectTool = (toolId) => {
+    if (activeTool === 'graph' && toolId !== 'graph') setSubgraphMode(false)
+    setActiveTool(toolId)
+  }
+
+  const handleCollapse = () => {
+    setSubgraphMode(false)
+    onCollapse()
+  }
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#1e1e1e] text-gray-900 dark:text-gray-200 border-l border-gray-200 dark:border-gray-800">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800">
-        <h2 className="text-sm font-semibold flex items-center gap-2">
-          <LayoutDashboard className="w-4 h-4 text-gray-700 dark:text-gray-400" />
-          Studio
-        </h2>
-        <button 
-          onClick={onCollapse}
-          className="text-gray-500 hover:text-gray-900 dark:text-gray-400 dark:hover:text-white p-1 rounded-md hover:bg-gray-100 dark:hover:bg-[#2a2a2a] transition-colors"
-          title="Close Studio"
+      {/* Header */}
+      <div className="flex items-center justify-between px-4 py-3 border-b border-gray-200 dark:border-gray-800 shrink-0">
+        {/* Breadcrumb */}
+        <nav className="flex items-center gap-1 text-sm font-medium min-w-0">
+          <button
+            onClick={handleBack}
+            className={`flex items-center gap-1.5 transition-colors ${
+              activeTool
+                ? 'text-gray-500 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-100'
+                : 'text-gray-800 dark:text-gray-100 cursor-default'
+            }`}
+          >
+            <LayoutTemplate className="w-4 h-4 shrink-0" />
+            <span>Canvas</span>
+          </button>
+
+          {activeTool && (
+            <>
+              <ChevronRight className="w-3.5 h-3.5 text-gray-400 dark:text-gray-600 shrink-0" />
+              <span className="text-gray-800 dark:text-gray-100 truncate">
+                {TOOL_LABELS[activeTool]}
+              </span>
+            </>
+          )}
+        </nav>
+
+        <button
+          onClick={handleCollapse}
+          className="shrink-0 ml-2 text-gray-400 hover:text-gray-700 dark:text-gray-500 dark:hover:text-gray-200 p-1 rounded-md hover:bg-gray-100 dark:hover:bg-[#2a2a2a] transition-colors"
+          title="Close Canvas"
         >
           <PanelRightClose className="w-4 h-4" />
         </button>
       </div>
 
-      <div className="p-4 overflow-y-auto">
-        <div className="bg-linear-to-r from-gray-50 to-gray-100 dark:from-[#212121] dark:to-[#2a2a2a] rounded-xl p-4 border border-gray-200 dark:border-gray-800 mb-6">
-          <p className="text-sm text-gray-600 dark:text-gray-300">
-            Welcome to Graph Studio. Explore your connected knowledge across documents and repositories.
-          </p>
-        </div>
-
-        <h3 className="text-xs font-semibold text-gray-500 dark:text-gray-500 uppercase tracking-wider mb-3">
-          Available Tools
-        </h3>
-
-        <div className="grid grid-cols-2 gap-3">
-          {tools.map((tool) => (
-            <button 
-              key={tool.name}
-              className={`bg-white dark:${tool.bg} hover:bg-gray-50 dark:hover:bg-[#333] border border-gray-200 dark:border-gray-700/50 shadow-sm dark:shadow-none rounded-xl p-3 flex flex-col gap-2 items-start transition-colors`}
-            >
-              <tool.icon className={`w-5 h-5 ${tool.color}`} />
-              <span className="text-xs font-medium text-left">{tool.name}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-8 text-center px-4">
-          <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-blue-50 dark:bg-[#2a2a2a] text-blue-500 dark:text-blue-400 mb-3">
-            <Network className="w-6 h-6" />
-          </div>
-          <h4 className="text-sm font-medium text-gray-900 dark:text-white mb-1">Graph outputs will appear here</h4>
-          <p className="text-xs text-gray-500 dark:text-gray-400">
-            Use the chat to ask questions that require exploring relationships.
-          </p>
-        </div>
+      {/* Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto">
+        {activeTool === null && (
+          <CanvasHome onSelectTool={handleSelectTool} />
+        )}
+        {activeTool === 'graph' && (
+          <GraphView
+            currentSession={currentSession}
+            graphData={graphData}
+            syncMode={subgraphMode}
+            onSetSyncMode={setSubgraphMode}
+          />
+        )}
+        {activeTool === 'docs' && (
+          <DocsView />
+        )}
       </div>
     </div>
   )
 }
 
-export default StudioPanel
+export default CanvasPanel

@@ -233,6 +233,7 @@ function Chat() {
                 <Panel defaultSize="30" minSize="20" maxSize="50">
                   <StudioPanel 
                     onCollapse={() => setIsStudioOpen(false)}
+                    currentSession={currentSession}
                   />
                 </Panel>
               </>

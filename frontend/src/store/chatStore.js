@@ -14,6 +14,10 @@ const useChatStore = create((set, get) => ({
   // Streaming states
   isStreaming: false,
   abortController: null,
+
+  // Graph canvas state
+  graphData: null,
+  subgraphMode: false,
   
   // Loading states
   isLoadingSessions: false,
@@ -21,6 +25,9 @@ const useChatStore = create((set, get) => ({
   isCreatingSession: false,
   
   error: null,
+
+  setSubgraphMode: (enabled) => set({ subgraphMode: enabled }),
+  clearGraphData: () => set({ graphData: null }),
 
   stopStreaming: () => {
     const controller = get().abortController;
@@ -217,36 +224,68 @@ const useChatStore = create((set, get) => ({
       abortController: controller
     }));
 
+    const { subgraphMode } = get();
+
+    // --- RAF token batching ---
+    // Accumulate tokens between animation frames so we call set() at most ~60fps
+    // instead of once per token (which can be 20-50+ times per second).
+    let pendingTokens = '';
+    let rafId = null;
+
+    const flushTokens = () => {
+      rafId = null;
+      if (!pendingTokens) return;
+      const batch = pendingTokens;
+      pendingTokens = '';
+      set((state) => ({
+        messages: state.messages.map(msg =>
+          msg.id === assistantId
+            ? { ...msg, content: msg.content + batch }
+            : msg
+        )
+      }));
+    };
+
     await chatMessageService.sendMessageStream(
       sessionId,
-      { content },
+      { content, subgraph_mode: subgraphMode },
       
       // onChunk handler
       (chunk) => {
         const { event, data } = chunk;
+
+        // Tokens are batched via RAF — never block the main thread per-token
+        if (event === 'token' && data.content) {
+          pendingTokens += data.content;
+          if (!rafId) rafId = requestAnimationFrame(flushTokens);
+          return;
+        }
+
+        // Flush any buffered tokens immediately before processing a control event
+        // so ordering is preserved (e.g. done comes after all tokens are flushed)
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          flushTokens();
+        }
         
         set((state) => ({
           messages: state.messages.map(msg => {
             if (msg.id !== assistantId) return msg;
 
-            let updatedContent = msg.content;
             let updatedStatus = msg.status;
             let updatedPhase = msg.metadata?.phase || 'processing';
             
-            if (event === 'token' && data.content) {
-              updatedContent += data.content;
-            } else if (event === 'pipeline' && data.type) {
-               updatedPhase = data.type;
+            if (event === 'pipeline' && data.type) {
+              updatedPhase = data.type;
             } else if (event === 'error') {
-               updatedStatus = 'error';
+              updatedStatus = 'error';
             } else if (event === 'done') {
-               updatedStatus = data.status || 'completed';
+              updatedStatus = data.status || 'completed';
             }
             
             return {
               ...msg,
               id: (event === 'done' && data.message_id) ? data.message_id : msg.id,
-              content: updatedContent,
               status: updatedStatus,
               created_at: (event === 'done' && data.created_at) ? data.created_at : msg.created_at,
               metadata: {
@@ -254,12 +293,16 @@ const useChatStore = create((set, get) => ({
                 phase: updatedPhase
               }
             };
-          })
+          }),
+          // Update graph panel when agent emits a graph_update event
+          // Only replace if the new result has actual nodes — preserve previous graph on empty results
+          ...(event === 'graph_update' && data?.nodes?.length > 0 ? { graphData: data } : {}),
         }));
       },
       
       // onError handler
       (err) => {
+        if (rafId) { cancelAnimationFrame(rafId); flushTokens(); }
         set((state) => ({
           messages: state.messages.map(msg => 
             msg.id === assistantId 
@@ -274,6 +317,7 @@ const useChatStore = create((set, get) => ({
       
       // onComplete handler
       () => {
+        if (rafId) { cancelAnimationFrame(rafId); flushTokens(); }
         set((state) => ({
           isStreaming: false,
           abortController: null
