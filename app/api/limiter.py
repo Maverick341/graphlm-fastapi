@@ -1,4 +1,4 @@
-import logging
+from functools import wraps
 
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -11,9 +11,36 @@ from app.utils.api_error import ApiError
 from app.core.error_codes import ErrorCodes
 from app.utils.error_utils import should_include_stack_trace
 from app.schemas.response import ApiResponse
+from app.core.config import settings
+from app.utils.logger import logger
 
-limiter = Limiter(key_func=get_remote_address)
-logger = logging.getLogger(__name__)
+
+class NoOpLimiter:
+    """Mock limiter that does nothing. Used for development."""
+
+    def limit(self, limit_string: str):
+        """Decorator that does nothing (pass-through)."""
+        def decorator(func):
+            @wraps(func)
+            async def async_wrapper(*args, **kwargs):
+                return await func(*args, **kwargs)
+
+            @wraps(func)
+            def sync_wrapper(*args, **kwargs):
+                return func(*args, **kwargs)
+
+            # Return async wrapper if function is async, else sync
+            return async_wrapper if hasattr(func, "__await__") else sync_wrapper
+
+        return decorator
+
+
+# Use real limiter in production/testing, no-op limiter in development
+limiter = (
+    Limiter(key_func=get_remote_address)
+    if settings.ENVIRONMENT != "development"
+    else NoOpLimiter()
+)
 
 
 async def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:

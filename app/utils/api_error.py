@@ -7,7 +7,6 @@ Mirrors Express.js error handling patterns.
 """
 
 import traceback
-import logging
 from typing import Any, List, Optional
 
 from fastapi import Request
@@ -16,10 +15,10 @@ from fastapi.exceptions import RequestValidationError
 from slowapi.errors import RateLimitExceeded
 
 from app.core.error_codes import ErrorCodes
+from app.core.config import settings
 from app.utils.error_utils import should_include_stack_trace, format_validation_errors
 from app.schemas.response import ApiResponse
-
-logger = logging.getLogger(__name__)
+from app.utils.logger import logger
 
 
 class ApiError(Exception):
@@ -215,4 +214,7 @@ def register_exception_handlers(app):
     app.add_exception_handler(ApiError, api_error_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, general_exception_handler)
-    app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+    
+    # Only register rate limit handler when rate limiting is enabled (non-development)
+    if settings.ENVIRONMENT != "development":
+        app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
