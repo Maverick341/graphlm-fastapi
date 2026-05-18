@@ -145,7 +145,7 @@ function Chat() {
   return (
     <div className="flex h-full min-h-0 flex-col bg-white dark:bg-[#1e1e1e]">
       {/* Top Header - Global App Header or Session Return */}
-      <div className="border-b border-gray-200 dark:border-gray-800 px-4 py-3 flex items-center justify-between bg-white dark:bg-[#1e1e1e]">
+      <div className="border-b border-gray-200 dark:border-gray-800 px-4 py-2 flex items-center justify-between bg-white dark:bg-[#1e1e1e]">
         <div className="flex items-center gap-4">
           <button
             onClick={() => navigate('/dashboard')}

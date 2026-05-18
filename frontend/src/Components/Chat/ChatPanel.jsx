@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, memo, useMemo } from 'react'
-import { ArrowUp, Loader2 } from 'lucide-react'
+import { ArrowUp, Loader2, MoreVertical, Pencil, X } from 'lucide-react'
 import { useChatStore } from '@/store'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -73,12 +73,62 @@ const MessageBubble = memo(function MessageBubble({ msg }) {
 function ChatPanel({ currentSession, isVectorIndexing, selectedSources = [] }) {
   const [input, setInput] = useState('')
   const { messages, sendMessage, stopStreaming, isStreaming, isLoadingMessages, isFetchingMore, hasMoreMessages, loadMoreMessages } = useChatStore()
+  const { fetchSessions } = useChatStore()
   const messagesEndRef = useRef(null)
   const scrollContainerRef = useRef(null)
   const previousScrollHeight = useRef(0)
   const isFetchingRef = useRef(false)
 
+  // 3-dot menu state
+  const [menuOpen, setMenuOpen] = useState(false)
+  const menuRef = useRef(null)
+
+  // Rename dialog state
+  const [isRenaming, setIsRenaming] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
+  const [renameLoading, setRenameLoading] = useState(false)
+  const renameInputRef = useRef(null)
+
   const isAtBottom = useRef(true)
+
+  // Close 3-dot menu on outside click
+  useEffect(() => {
+    const handleClick = (e) => {
+      if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  // Focus rename input when dialog opens
+  useEffect(() => {
+    if (isRenaming) {
+      setRenameValue(currentSession?.title || '')
+      setTimeout(() => renameInputRef.current?.select(), 50)
+    }
+  }, [isRenaming])
+
+  const handleOpenRename = () => {
+    setMenuOpen(false)
+    setIsRenaming(true)
+  }
+
+  const handleRename = async (e) => {
+    e.preventDefault()
+    const trimmed = renameValue.trim()
+    if (!trimmed || !currentSession) return
+    setRenameLoading(true)
+    try {
+      const { chatSessionService } = await import('@/api/chatSessionService')
+      await chatSessionService.renameSession(currentSession.id, trimmed)
+      await fetchSessions()
+    } catch (err) {
+      console.error('Rename failed:', err)
+    } finally {
+      setRenameLoading(false)
+      setIsRenaming(false)
+    }
+  }
 
   // Pin the scroll to the bottom during streaming — instant, no animation fighting
   const pinToBottom = () => {
@@ -129,10 +179,89 @@ function ChatPanel({ currentSession, isVectorIndexing, selectedSources = [] }) {
 
   return (
     <div className="flex h-full flex-col bg-gray-50 dark:bg-[#212121] relative">
-      <div 
+
+      {/* Chat panel header */}
+      <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#1e1e1e] shrink-0">
+        <span className="text-sm font-medium text-gray-700 dark:text-gray-300 flex items-center gap-2">
+          <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-gray-400 dark:text-gray-500">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          Chat
+        </span>
+
+        {/* 3-dot menu */}
+        <div className="relative" ref={menuRef}>
+          <button
+            onClick={() => setMenuOpen(o => !o)}
+            className="p-1 rounded-md text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#2a2a2a] transition-colors"
+            title="Chat options"
+          >
+            <MoreVertical className="w-4 h-4" />
+          </button>
+
+          {menuOpen && (
+            <div className="absolute right-0 top-full mt-1 w-40 bg-white dark:bg-[#2a2a2a] border border-gray-200 dark:border-gray-700 rounded-lg shadow-lg z-50 py-1 overflow-hidden">
+              <button
+                onClick={handleOpenRename}
+                className="flex items-center gap-2.5 w-full px-3 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-[#3a3a3a] transition-colors"
+              >
+                <Pencil className="w-3.5 h-3.5 text-gray-400" />
+                Rename
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Rename dialog */}
+      {isRenaming && (
+        <div className="absolute inset-0 z-50 flex items-start justify-center pt-24 px-6">
+          {/* Backdrop */}
+          <div className="absolute inset-0 bg-black/30 dark:bg-black/50" onClick={() => setIsRenaming(false)} />
+          <form
+            onSubmit={handleRename}
+            className="relative w-full max-w-sm bg-white dark:bg-[#2a2a2a] rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700 p-5"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-900 dark:text-gray-100">Rename chat</h3>
+              <button type="button" onClick={() => setIsRenaming(false)} className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <input
+              ref={renameInputRef}
+              type="text"
+              value={renameValue}
+              onChange={e => setRenameValue(e.target.value)}
+              maxLength={100}
+              placeholder="Chat name"
+              className="w-full px-3 py-2 text-sm border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-[#1e1e1e] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 dark:focus:ring-blue-600 mb-3"
+            />
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsRenaming(false)}
+                className="px-3 py-1.5 text-sm text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-[#3a3a3a] rounded-lg transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={!renameValue.trim() || renameLoading}
+                className="px-3 py-1.5 text-sm font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+              >
+                {renameLoading ? 'Saving…' : 'Save'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Scrollable messages area */}
+      <div
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="absolute inset-0 overflow-y-auto px-6 pt-8 pb-24"
+        className="flex-1 overflow-y-auto px-6 pt-6 pb-24"
       >
         <div className="max-w-3xl mx-auto space-y-8">
           {hasMoreMessages && !isFetchingMore && (
@@ -178,7 +307,7 @@ function ChatPanel({ currentSession, isVectorIndexing, selectedSources = [] }) {
         </div>
       </div>
 
-      <footer className="absolute bottom-0 left-0 right-0 p-4 pb-6 bg-transparent pointer-events-none">
+      <div className="absolute bottom-0 left-0 right-0 p-4 pb-6 bg-transparent pointer-events-none">
         <form onSubmit={handleSendMessage} className="max-w-3xl mx-auto relative pointer-events-auto">
           <input
             type="text"
@@ -207,7 +336,7 @@ function ChatPanel({ currentSession, isVectorIndexing, selectedSources = [] }) {
             </button>
           )}
         </form>
-      </footer>
+      </div>
     </div>
   )
 }
