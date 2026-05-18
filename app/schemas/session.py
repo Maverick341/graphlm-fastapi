@@ -90,6 +90,10 @@ class SendMessageRequest(BaseModel):
     When subgraph_mode is True, the agent will call the subgraph_query tool
     alongside its normal response and emit a graph_update SSE event with
     relevant nodes and edges for the graph panel visualization.
+
+    selected_source_ids controls which sources the subgraph_query tool is scoped
+    to when subgraph_mode is True. Has no effect on standalone chat (subgraph_mode=False),
+    which always uses all session sources.
     """
     content: str = Field(
         ...,
@@ -104,12 +108,22 @@ class SendMessageRequest(BaseModel):
             "a graph_update SSE event for the KG panel."
         ),
     )
+    selected_source_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Source IDs to scope the subgraph_query tool to when subgraph_mode=True. "
+            "Must be a subset of sources attached to the session. "
+            "Ignored when subgraph_mode=False. "
+            "Defaults to all graph-indexed session sources when omitted."
+        ),
+    )
 
     class Config:
         json_schema_extra = {
             "example": {
                 "content": "What are the main features of this system?",
                 "subgraph_mode": True,
+                "selected_source_ids": ["323e4567-e89b-12d3-a456-426614174002"],
             }
         }
 
@@ -121,6 +135,10 @@ class GraphQueryRequest(BaseModel):
     Used by the KG Studio panel's Explore tab — independent of chat.
     Query is scoped to sources attached to the session.
     Results are controlled by max_nodes and hop_depth.
+
+    If source_ids is provided, the query is scoped to those sources only
+    (must be a subset of the session's attached sources).
+    If omitted, all session sources are used.
     """
     query: str = Field(
         ...,
@@ -145,6 +163,14 @@ class GraphQueryRequest(BaseModel):
             "3 = three hops (wide, may be slow)"
         ),
     )
+    source_ids: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Optional subset of source IDs to scope the query to. "
+            "Must be IDs of sources attached to this session. "
+            "Defaults to all session sources when omitted or null."
+        ),
+    )
 
     class Config:
         json_schema_extra = {
@@ -152,6 +178,7 @@ class GraphQueryRequest(BaseModel):
                 "query": "authentication flow and JWT token handling",
                 "max_nodes": 150,
                 "hop_depth": 2,
+                "source_ids": ["323e4567-e89b-12d3-a456-426614174002"],
             }
         }
 

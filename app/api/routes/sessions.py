@@ -426,6 +426,7 @@ async def send_message(
             user_content=content,
             background_tasks=background_tasks,
             subgraph_mode=body.subgraph_mode,
+            selected_source_ids=body.selected_source_ids,
         ),
         media_type="text/event-stream",
         headers={
@@ -559,6 +560,19 @@ async def graph_query(
     
     source_ids = [str(source.id) for source in session.sources]
 
+    # If the caller sent a subset of source IDs, scope the query to those only.
+    # Validate that every requested ID is actually attached to this session.
+    if body.source_ids:
+        session_source_id_set = {str(s.id) for s in session.sources}
+        invalid_ids = [sid for sid in body.source_ids if sid not in session_source_id_set]
+        if invalid_ids:
+            raise ApiError(
+                400,
+                f"source_ids not attached to this session: {invalid_ids}",
+                code="INVALID_SOURCE_IDS",
+            )
+        source_ids = body.source_ids
+
     try:
         subgraph = await run_graph_query(
             query=query,
@@ -569,7 +583,10 @@ async def graph_query(
 
         response_data = GraphResponse(
             nodes=[n.model_dump() for n in subgraph.nodes],
-            edges=[e.model_dump() for e in subgraph.edges],
+            edges=[
+                {**e.model_dump(exclude={"type"}), "relationship_type": e.type}
+                for e in subgraph.edges
+            ],
             anchor_ids=[n.id for n in subgraph.nodes],
             query=query,
             truncated=subgraph.truncated,

@@ -61,7 +61,7 @@ const VIS_OPTIONS = {
   layout: { randomSeed: 42 },
 }
 
-export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode }) {
+export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode, selectedSources = [] }) {
   const containerRef = useRef(null)
   const networkRef = useRef(null)
   const [query, setQuery] = useState('')
@@ -72,6 +72,22 @@ export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode }
   const [edgeCount, setEdgeCount] = useState(0)
   const [errorMsg, setErrorMsg] = useState('')
   const mode = syncMode ? 'sync' : 'explore'
+
+  // Helper: filter graph data to only include nodes whose source_id is in selectedSources,
+  // then drop any edges whose endpoints were removed.
+  const filterToSelection = (data) => {
+    if (!selectedSources.length || !data?.nodes?.length) return data
+    const allowedSet = new Set(selectedSources)
+    const filteredNodes = data.nodes.filter(n => {
+      const sid = n.properties?.source_id
+      return !sid || allowedSet.has(sid)
+    })
+    const filteredNodeIds = new Set(filteredNodes.map(n => n.id))
+    const filteredEdges = (data.edges || []).filter(
+      e => filteredNodeIds.has(e.source) && filteredNodeIds.has(e.target)
+    )
+    return { ...data, nodes: filteredNodes, edges: filteredEdges }
+  }
 
   // Render/update graph when graphData changes
   useEffect(() => {
@@ -90,11 +106,12 @@ export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode }
     }
   }, [graphData])
 
-  // Load full graph on mount in explore mode if no graphData yet
+  // Re-fetch full graph when selected sources change (explore mode only)
   useEffect(() => {
-    if (!currentSession || graphData) return
+    if (!currentSession || syncMode) return
     handleLoadFullGraph()
-  }, [currentSession?.id])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSources])
 
   const handleLoadFullGraph = async () => {
     if (!currentSession) return
@@ -102,7 +119,9 @@ export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode }
     setErrorMsg('')
     try {
       const res = await chatSessionService.getFullGraph(currentSession.id)
-      const data = res.data
+      const raw = res.data
+      // Filter to selected sources on the frontend
+      const data = filterToSelection(raw)
       if (!data?.nodes?.length) {
         setIsEmpty(true)
       } else {
@@ -129,7 +148,12 @@ export function GraphView({ currentSession, graphData, syncMode, onSetSyncMode }
     setIsLoading(true)
     setErrorMsg('')
     try {
-      const res = await chatSessionService.queryGraph(currentSession.id, { query: query.trim() })
+      const queryData = {
+        query: query.trim(),
+        // Pass selected source IDs to scope the backend Cypher query
+        ...(selectedSources.length ? { source_ids: selectedSources } : {}),
+      }
+      const res = await chatSessionService.queryGraph(currentSession.id, queryData)
       const data = res.data
       if (!data?.nodes?.length) {
         setIsEmpty(true)

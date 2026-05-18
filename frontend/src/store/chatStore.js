@@ -192,7 +192,7 @@ const useChatStore = create((set, get) => ({
     }
   },
 
-  sendMessage: async (sessionId, content) => {
+  sendMessage: async (sessionId, content, selectedSources = []) => {
     if (!content.trim() || get().isStreaming) return;
 
     const controller = new AbortController();
@@ -226,7 +226,18 @@ const useChatStore = create((set, get) => ({
 
     const { subgraphMode } = get();
 
-    // --- RAF token batching ---
+    // Build request body.
+    // In subgraph_mode, pass the selected source IDs so the backend scopes
+    // the subgraph_query tool to only those sources.
+    // Standalone chat (subgraph_mode=false) always uses all session sources.
+    const messageBody = {
+      content,
+      subgraph_mode: subgraphMode,
+      ...(subgraphMode && selectedSources.length > 0
+        ? { selected_source_ids: selectedSources }
+        : {}),
+    };
+
     // Accumulate tokens between animation frames so we call set() at most ~60fps
     // instead of once per token (which can be 20-50+ times per second).
     let pendingTokens = '';
@@ -248,7 +259,7 @@ const useChatStore = create((set, get) => ({
 
     await chatMessageService.sendMessageStream(
       sessionId,
-      { content, subgraph_mode: subgraphMode },
+      messageBody,
       
       // onChunk handler
       (chunk) => {

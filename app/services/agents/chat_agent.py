@@ -131,6 +131,13 @@ delete_memory
 
     # ── Subgraph mode directive ────────────────────────────────────────────────────
     if context.subgraph_mode and has_graph:
+        # Determine effective graph scope for the subgraph_query tool
+        effective_ids = context.graph_source_ids or context.source_ids
+        is_scoped = (
+            context.graph_source_ids is not None
+            and set(context.graph_source_ids) != set(context.source_ids)
+        )
+
         prompt += (
             "\n━━━ GRAPH PANEL MODE (ACTIVE) ━━━\n"
             "The user has explicitly enabled the graph panel in subgraph mode.\n"
@@ -143,6 +150,20 @@ delete_memory
             "Example: 'Tell me about roles in the PDF' → subgraph_query('job roles responsibilities')\n"
             "Example: 'What is JWT?' → subgraph_query('JWT authentication token')\n"
         )
+
+        if is_scoped:
+            prompt += (
+                f"\n⚠ CANVAS SOURCE SCOPE (IMPORTANT): The graph panel is restricted to "
+                f"{len(effective_ids)} of {len(context.source_ids)} available source(s).\n"
+                "The subgraph_query tool ONLY queries the following selected sources:\n"
+            )
+            for sid in effective_ids:
+                prompt += f"  - {sid}\n"
+            prompt += (
+                "Do NOT tell the user you have access to ALL session sources for the graph panel.\n"
+                "The graph visualization is scoped to the sources listed above.\n"
+                "Other tools (vector_search, graph_search) still access all session sources.\n"
+            )
 
     return prompt
 
@@ -223,6 +244,7 @@ async def run_agent_stream(
     source_ids: list[str],
     chat_id: str,
     subgraph_mode: bool = False,
+    graph_source_ids: list[str] | None = None,
 ):
     """
     Stream version of run_agent — yields typed events with metadata.
@@ -256,8 +278,10 @@ async def run_agent_stream(
         messages:         Pre-built context window from context.build_context_window()
                           [{role, content}, ...] in chronological order
         collection_names: Qdrant collections available for vector_search
-        source_ids:       Neo4j source_ids available for graph_search
+        source_ids:       Neo4j source_ids available for graph_search (all session)
         chat_id:          Chat session UUID string (passed to context for tool logging)
+        subgraph_mode:    Whether graph panel sync is enabled
+        graph_source_ids: Neo4j source_ids scoped to canvas selection (subgraph_query only)
 
     Yields:
         Tuples of (event_type: str, event_data: dict):
@@ -272,6 +296,7 @@ async def run_agent_stream(
         user_id=user_id,
         chat_id=chat_id,
         subgraph_mode=subgraph_mode,
+        graph_source_ids=graph_source_ids,
     )
 
     tools = [

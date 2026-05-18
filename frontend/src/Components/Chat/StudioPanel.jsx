@@ -10,7 +10,7 @@ const TOOL_LABELS = {
   docs: 'Docs',
 }
 
-function CanvasPanel({ onCollapse, currentSession }) {
+function CanvasPanel({ onCollapse, currentSession, selectedSources = [], onActiveToolChange }) {
   const [activeTool, setActiveTool] = useState(null) // null = home
   const { graphData, subgraphMode, setSubgraphMode } = useChatStore()
 
@@ -18,15 +18,19 @@ function CanvasPanel({ onCollapse, currentSession }) {
   const handleBack = () => {
     if (activeTool === 'graph') setSubgraphMode(false)
     setActiveTool(null)
+    onActiveToolChange?.(null)
   }
 
   const handleSelectTool = (toolId) => {
     if (activeTool === 'graph' && toolId !== 'graph') setSubgraphMode(false)
     setActiveTool(toolId)
+    onActiveToolChange?.(toolId)
   }
 
   const handleCollapse = () => {
     setSubgraphMode(false)
+    setActiveTool(null)
+    onActiveToolChange?.(null)
     onCollapse()
   }
 
@@ -70,7 +74,7 @@ function CanvasPanel({ onCollapse, currentSession }) {
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto">
         {activeTool === null && (
-          <CanvasHome onSelectTool={handleSelectTool} />
+          <CanvasHome onSelectTool={handleSelectTool} selectedSources={selectedSources} />
         )}
         {activeTool === 'graph' && (
           <GraphView
@@ -78,6 +82,7 @@ function CanvasPanel({ onCollapse, currentSession }) {
             graphData={graphData}
             syncMode={subgraphMode}
             onSetSyncMode={setSubgraphMode}
+            selectedSources={selectedSources}
           />
         )}
         {activeTool === 'docs' && (

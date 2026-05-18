@@ -70,7 +70,7 @@ const MessageBubble = memo(function MessageBubble({ msg }) {
   )
 })
 
-function ChatPanel({ currentSession, isVectorIndexing }) {
+function ChatPanel({ currentSession, isVectorIndexing, selectedSources = [] }) {
   const [input, setInput] = useState('')
   const { messages, sendMessage, stopStreaming, isStreaming, isLoadingMessages, isFetchingMore, hasMoreMessages, loadMoreMessages } = useChatStore()
   const messagesEndRef = useRef(null)
@@ -123,7 +123,7 @@ function ChatPanel({ currentSession, isVectorIndexing }) {
     const content = input
     setInput('')
     isAtBottom.current = true // ensure we scroll to new message
-    await sendMessage(currentSession.id, content)
+    await sendMessage(currentSession.id, content, selectedSources)
   }
 
 

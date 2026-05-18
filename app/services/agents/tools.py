@@ -35,10 +35,13 @@ from app.core.config import settings
 @dataclass
 class AgentPromptContext:
     collection_names: list[str]   # Qdrant source collections (vector RAG)
-    source_ids: list[str]         # Neo4j source_ids (graph RAG)
+    source_ids: list[str]         # Neo4j source_ids (graph RAG — all session sources)
     user_id: str                  # Mem0 user scope
     chat_id: str                  # For logging / future session-scoped memory
     subgraph_mode: bool = False   # Whether graph panel is in subgraph mode
+    # Source IDs scoped to the user's canvas selection (subgraph_query tool only).
+    # Defaults to None which causes subgraph_query to fall back to source_ids.
+    graph_source_ids: list[str] | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -350,7 +353,9 @@ async def subgraph_query(
     """
     from app.services.agents.graph_query_agent import run_graph_query
 
-    source_ids = wrapper.context.source_ids
+    # Use the canvas-scoped source IDs when available (set in subgraph_mode
+    # with user selection), otherwise fall back to all session graph sources.
+    source_ids = wrapper.context.graph_source_ids or wrapper.context.source_ids
 
     if not source_ids:
         return '{"error": "No graph-indexed sources attached to this session."}'

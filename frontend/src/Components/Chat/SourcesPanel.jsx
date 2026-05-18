@@ -2,8 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { Plus, Search, FileText, GitBranch, ChevronRight, PanelLeftClose, MoreVertical, Trash2 } from 'lucide-react'
 import useChatStore from '@/store/chatStore'
 
-function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddModal, handleOpenSource }) {
-  const [selectedSources, setSelectedSources] = useState([])
+function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddModal, handleOpenSource, selectedSources = [], onSelectionChange, isGraphViewOpen = false }) {
   const [openMenuId, setOpenMenuId] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
   const sources = currentSession?.sources || []
@@ -49,21 +48,21 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddMod
 
   const handleSelectAll = (e) => {
     if (e.target.checked) {
-      const newSelections = new Set([...selectedSources, ...filteredSources.map(s => s.id)]);
-      setSelectedSources(Array.from(newSelections));
+      const newSelections = new Set([...selectedSources, ...filteredSources.map(s => s.id)])
+      onSelectionChange(Array.from(newSelections))
     } else {
-      const filteredIds = new Set(filteredSources.map(s => s.id));
-      setSelectedSources(prev => prev.filter(id => !filteredIds.has(id)));
+      const filteredIds = new Set(filteredSources.map(s => s.id))
+      onSelectionChange(selectedSources.filter(id => !filteredIds.has(id)))
     }
-  };
+  }
 
   const handleSelect = (sourceId) => {
-    setSelectedSources(prev => 
-      prev.includes(sourceId) 
-        ? prev.filter(id => id !== sourceId)
-        : [...prev, sourceId]
-    );
-  };
+    onSelectionChange(
+      selectedSources.includes(sourceId)
+        ? selectedSources.filter(id => id !== sourceId)
+        : [...selectedSources, sourceId]
+    )
+  }
 
   return (
     <div className="flex flex-col h-full bg-white dark:bg-[#1e1e1e] text-gray-900 dark:text-gray-200 border-r border-gray-200 dark:border-gray-800">
@@ -103,13 +102,17 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddMod
       <div className="flex-1 overflow-y-auto px-2 mt-2 space-y-1">
         {/* Select All Header */}
         {filteredSources.length > 0 && (
-          <div className="flex items-center justify-end px-2 py-2 mb-2 border-b border-gray-200 dark:border-gray-800 gap-3">
-            <span className="text-xs text-gray-500 dark:text-gray-400">Select all</span>
+          <div
+            className="flex items-center justify-end px-2 py-2 mb-2 border-b border-gray-200 dark:border-gray-800 gap-3"
+            title={isGraphViewOpen ? 'Close Graph View to change source selection' : ''}
+          >
+            <span className={`text-xs ${isGraphViewOpen ? 'text-gray-400 dark:text-gray-600' : 'text-gray-500 dark:text-gray-400'}`}>Select all</span>
             <input 
               type="checkbox" 
               checked={filteredSources.length > 0 && filteredSources.every(s => selectedSources.includes(s.id))}
               onChange={handleSelectAll}
-              className="rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-white dark:focus:ring-offset-gray-900 cursor-pointer w-4 h-4 ml-1"
+              disabled={isGraphViewOpen}
+              className={`rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-white dark:focus:ring-offset-gray-900 w-4 h-4 ml-1 ${isGraphViewOpen ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
             />
           </div>
         )}
@@ -170,7 +173,9 @@ function SourcesPanel({ currentSession, sourceProgress, onCollapse, onOpenAddMod
                   type="checkbox" 
                   checked={selectedSources.includes(source.id)}
                   onChange={() => handleSelect(source.id)}
-                  className="rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-white dark:focus:ring-offset-gray-900 cursor-pointer w-4 h-4 ml-1"
+                  disabled={isGraphViewOpen}
+                  title={isGraphViewOpen ? 'Close Graph View to change source selection' : ''}
+                  className={`rounded border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-white dark:focus:ring-offset-gray-900 w-4 h-4 ml-1 ${isGraphViewOpen ? 'opacity-40 cursor-not-allowed' : 'cursor-pointer'}`}
                   onClick={(e) => e.stopPropagation()}
                 />
               </div>

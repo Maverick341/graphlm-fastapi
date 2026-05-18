@@ -84,6 +84,35 @@ def _resolve_sources(
     return collection_names, source_ids
 
 
+def _resolve_graph_source_ids_for_subgraph(
+    all_graph_source_ids: list[str],
+    selected_source_ids: list[str] | None,
+) -> list[str]:
+    """
+    Compute the Neo4j source_ids that the subgraph_query tool should use.
+
+    Rules:
+      - If selected_source_ids is None or empty → use all graph-indexed IDs
+      - Otherwise → intersect selected_source_ids with graph-indexed IDs
+        (only selected sources that are actually graph-indexed get queried)
+
+    This ensures we never pass IDs that are not graph-indexed to Neo4j,
+    and we respect the user's canvas source selection.
+
+    Args:
+        all_graph_source_ids: All graph-indexed source IDs for the session
+        selected_source_ids:  Source IDs chosen by user in the Sources panel
+
+    Returns:
+        List of source IDs to scope the subgraph_query to
+    """
+    if not selected_source_ids:
+        return all_graph_source_ids  # no selection → use all
+
+    selected_set = set(selected_source_ids)
+    return [sid for sid in all_graph_source_ids if sid in selected_set]
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # Main Pipeline (Non-streaming)
 # ─────────────────────────────────────────────────────────────────────────
@@ -160,6 +189,7 @@ async def run_agent_pipeline_stream(
     chat_id: UUID,
     user_message: str,
     subgraph_mode: bool = False,
+    selected_source_ids: list[str] | None = None,
 ):
     """
     Streaming pipeline: user message → agent reply (token-by-token).
@@ -172,14 +202,22 @@ async def run_agent_pipeline_stream(
       3. Run agent with streaming, yield text chunks
       4. Return full reply via async generator
 
+    When subgraph_mode=True and selected_source_ids is provided, the graph_source_ids
+    passed to the subgraph_query tool are restricted to the intersection of:
+      - graph-indexed source IDs for this session
+      - user-selected source IDs (from the Sources panel checkboxes)
+    Standalone chat tools (vector_search, graph_search) always use all session sources.
+
     DB session is closed before agent streaming starts — no long-held connections
     during LLM inference time.
 
     Args:
-        user_id:      User UUID string (scopes Mem0 memory)
-        session:      ChatSession ORM object (with .sources pre-loaded)
-        chat_id:      UUID of the chat session
-        user_message: The current user message text
+        user_id:             User UUID string (scopes Mem0 memory)
+        session:             ChatSession ORM object (with .sources pre-loaded)
+        chat_id:             UUID of the chat session
+        user_message:        The current user message text
+        subgraph_mode:       Whether graph panel sync is enabled
+        selected_source_ids: Source IDs selected in the UI (scopes subgraph_query only)
 
     Yields:
         Text chunks from agent response (strings)
@@ -201,12 +239,29 @@ async def run_agent_pipeline_stream(
             )
         # DB session closed here — agent stream runs outside the connection
 
+        # Compute graph source IDs for the subgraph_query tool.
+        # In subgraph_mode with a user selection: use the intersection.
+        # Otherwise: same as source_ids (all graph-indexed sources).
+        if subgraph_mode and selected_source_ids:
+            graph_source_ids = _resolve_graph_source_ids_for_subgraph(
+                all_graph_source_ids=source_ids,
+                selected_source_ids=selected_source_ids,
+            )
+            logger.info(
+                f"[Pipeline] subgraph_mode scoping: "
+                f"all_graph={source_ids} selected={selected_source_ids} "
+                f"→ graph_source_ids={graph_source_ids}"
+            )
+        else:
+            graph_source_ids = source_ids
+
         # Step 3: Stream agent with pre-built context
         async for chunk in run_agent_stream(
             user_id=user_id,
             messages=context_window,
             collection_names=collection_names,
             source_ids=source_ids,
+            graph_source_ids=graph_source_ids,
             chat_id=str(chat_id),
             subgraph_mode=subgraph_mode,
         ):

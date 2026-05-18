@@ -50,10 +50,21 @@ function Chat() {
   
   const [sourceProgress, setSourceProgress] = useState({})
 
+  // ── Selected-sources for Canvas scoping ──────────────────────────────
+  // Defaults to all source IDs (all selected) every time a session is opened.
+  const [selectedSources, setSelectedSources] = useState([])
+
+  useEffect(() => {
+    if (currentSession?.sources) {
+      setSelectedSources(currentSession.sources.map(s => s.id))
+    }
+  }, [currentSession?.id])
+
   // Panel refs and state
   const [isSourcesOpen, setIsSourcesOpen] = useState(true)
   const [isStudioOpen, setIsStudioOpen] = useState(true)
   const [isAddModalOpen, setIsAddModalOpen] = useState(false)
+  const [activeCanvasTool, setActiveCanvasTool] = useState(null)
 
   const handleOpenSource = (source) => {
     const meta = source.metadata || source.source_metadata || {};
@@ -212,6 +223,9 @@ function Chat() {
                     onCollapse={() => setIsSourcesOpen(false)}
                     onOpenAddModal={() => setIsAddModalOpen(true)}
                     handleOpenSource={handleOpenSource}
+                    selectedSources={selectedSources}
+                    onSelectionChange={setSelectedSources}
+                    isGraphViewOpen={activeCanvasTool === 'graph'}
                   />
                 </Panel>
                 <PanelResizeHandle className="w-1 bg-transparent hover:bg-blue-500/50 active:bg-blue-500 transition-colors cursor-col-resize z-10" />
@@ -223,6 +237,7 @@ function Chat() {
               <ChatPanel 
                 currentSession={currentSession}
                 isVectorIndexing={isVectorIndexing}
+                selectedSources={selectedSources}
               />
             </Panel>
 
@@ -234,6 +249,8 @@ function Chat() {
                   <StudioPanel 
                     onCollapse={() => setIsStudioOpen(false)}
                     currentSession={currentSession}
+                    selectedSources={selectedSources}
+                    onActiveToolChange={setActiveCanvasTool}
                   />
                 </Panel>
               </>
